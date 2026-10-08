@@ -7,7 +7,7 @@ Media processing runs on the device. The app uses yt-dlp for regular downloads, 
 ## Download and install
 
 1. Open [GitHub Releases](../../releases).
-2. Download **ytdlpMobile.apk** from the release's **Assets** section.
+2. Download **yt-dlp-Mobile-1.0.0.apk** from the release's **Assets** section.
 3. Open the APK on your Android device. If Android asks, allow installation from the browser or file manager you used.
 4. Open **yt-dlp Mobile** and allow the permissions needed for the operation you choose.
 

@@ -1,0 +1,8 @@
+<resources>
+    <color name="primary">#7C4DFF</color>
+    <color name="primary_dark">#5E35B1</color>
+    <color name="accent">#00C2A8</color>
+    <color name="surface_dark">#15131A</color>
+    <color name="card_dark">#211E29</color>
+    <color name="white">#FFFFFF</color>
+</resources>
