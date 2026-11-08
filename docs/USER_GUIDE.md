@@ -1,13 +1,19 @@
 # yt-dlp Mobile User Guide
 
-This guide covers version **1.0.0**. Website support depends on the page type, the website's current behavior, and the installed yt-dlp engine.
+This guide covers the released version **1.0.63**. Later development changes are recorded under [Unreleased](../CHANGELOG.md#unreleased) and are not automatically part of the installed release. Website support depends on the page type, the website's current behavior, and the installed yt-dlp engine.
 
 ## Contents
 
 - [Choosing the right screen and button](#choosing-the-right-screen-and-button)
+- [Appearance and display](#appearance-and-display)
 - [Regular video and audio downloads](#regular-video-and-audio-downloads)
 - [Cookies and signed-in downloads](#cookies-and-signed-in-downloads)
 - [Browser-assisted download](#browser-assisted-download)
+- [Website support and dedicated handlers](#website-support-and-dedicated-handlers)
+- [Queue, retries and partial media](#queue-retries-and-partial-media)
+- [Monitoring](#monitoring)
+- [Custom monitoring sources](#custom-monitoring-sources)
+- [Comic update monitoring](#comic-update-monitoring)
 - [Live stream recording](#live-stream-recording)
 - [Stalls and recovery](#stalls-and-recovery)
 - [Audio timing and gaps](#audio-timing-and-gaps)
@@ -18,7 +24,7 @@ This guide covers version **1.0.0**. Website support depends on the page type, t
 
 ## Choosing the right screen and button
 
-The main screen handles video/audio downloads and browser-assisted recording. Swipe to **Collections** for supported comics, image collections, and PDF conversion. Swipe back to return to the main screen. Page indicators identify the selected screen at the top and bottom; a fresh app opening starts on the main screen.
+The three main pages are **Collections**, **Main**, and **Monitoring**. Use their navigation buttons or swipe between pages. Main handles video/audio downloads and browser-assisted recording; Collections handles supported images/comics and PDF conversion; Monitoring checks saved sources for new content. A fresh app opening starts on Main. Navigation stays visible above the scrolling content in portrait and becomes a side rail in landscape. Settings, Queue & history, dialogs, setup pages, and Browser Assist have their own controls rather than the main-page navigation.
 
 | Button | Use it for |
 | --- | --- |
@@ -27,8 +33,25 @@ The main screen handles video/audio downloads and browser-assisted recording. Sw
 | Browser-assisted stream recording | Capturing a supported playing live stream until you stop |
 | Download collection | Supported comic, album, gallery, post, or result-page links |
 | Convert / Make PDF | Reviewing images and creating an ordered PDF |
+| Add monitoring link | Scheduling supported upload/live checks |
+| Add comic update rule | Checking one supported comic/album for new pages |
+| Queue & history | Viewing media tasks, retrying, stopping, saving partial material, and opening diagnostics |
+| Appearance & display | Choosing the app theme and orientation |
 
 **Example:** To save a complete social media video, first use the full post link with **Download**. If access requires your account, import cookies. If you want to capture a live broadcast over time, use the stream recorder instead.
+
+## Appearance and display
+
+Open **Appearance & display** on Main.
+
+| Setting | Choices |
+| --- | --- |
+| Theme | Dark, Light, Follow device |
+| Screen orientation | Follow Android, Portrait, Landscape |
+
+**Follow Android** respects the device's rotation setting and rotation suggestion. Landscape uses a side rail on the main pages and rearranges browser controls beside the website. Scroll within a control panel if it does not fit. Theme/orientation changes are presentation settings; current forms and browser sessions are intended to stay open. Report lost input or interrupted tasks as a bug.
+
+Website colors inside Browser Assist are controlled by the website. The app's Light theme does not guarantee a light website.
 
 ## Regular video and audio downloads
 
@@ -45,8 +68,10 @@ The main screen handles video/audio downloads and browser-assisted recording. Sw
 | --- | --- |
 | MP4 compatibility | A useful starting point for common players; availability still depends on the source |
 | Best available quality | Prioritizes available quality and may produce WebM or MKV |
-| MP3 | Extracts/converts an audio track |
-| M4A | Extracts an audio track in an M4A output |
+| MP3 audio | Extracts/converts an audio track |
+| M4A audio | Extracts an audio track in an M4A output |
+| Original/site-selected format | Leaves the explicit format preference unset so the handler/extractor can choose; does not guarantee the original upload's codec or quality |
+| Subtitles file only | Saves available captions without downloading the video |
 
 MP4 compatibility is not a universal video transcoder. If the site does not offer suitable formats, the download can still fail or fall back according to the downloader's selection.
 
@@ -66,13 +91,15 @@ For English variants plus Spanish:
 en.*,es
 ```
 
+Choose **Subtitles file only** when you want captions without downloading the video. Use the original webpage link because a direct media URL may not expose captions.
+
 Enable **Include automatic subtitles** if you also want machine-generated captions where the source provides them. These options do not guarantee that every video has subtitles or that every player will display them automatically.
 
 ### Parallel fragments and speed
 
 **Maximum download speed (parallel fragments)** requests up to eight fragments concurrently for eligible segmented downloads. An ordinary direct MP4 is not automatically divided into eight parallel downloads by this option.
 
-The app can retry once without parallel fragments after certain server/fragment failures. Turn the option off if a website rejects concurrent requests. High or fluctuating speed readings alone do not confirm parallel downloading. ETA is an estimate and can change.
+The app can retry once without parallel fragments after certain server/fragment failures. Some dedicated-handler or rate-recovery paths deliberately use one fragment connection even when the general option is enabled. Turn the option off if a website rejects concurrent requests. High or fluctuating speed readings alone do not confirm parallel downloading. ETA is an estimate and can change.
 
 ### Extra yt-dlp arguments
 
@@ -84,9 +111,32 @@ Enter options only, without writing `yt-dlp` at the beginning. For example:
 
 The app controls output paths, cookies, configuration, and executable handling. Some conflicting or unsafe options are blocked. Keep the field empty while diagnosing a download problem.
 
+### Extra options and presets
+
+Expand **Extra options & presets** for optional normal-Download controls. The per-download extras default off and do not automatically configure Browser Assist, recording, Collections or Monitoring.
+
+| Extra option | How to use it |
+| --- | --- |
+| Prefer maximum resolution | Enable and select a resolution preference/ceiling; it does not upscale a source or guarantee that resolution is offered |
+| Download a section | Enter start/end times; cuts can begin near a keyframe rather than at an exact frame |
+| Only selected playlist items | Enter a selection such as `1-5,8,12` with the appropriate playlist settings |
+| Limit download speed | Enable and enter a value; `K` means KiB/s and `M` means MiB/s, not network megabits/s |
+| Thumbnail, metadata and chapters | Embed/save the selected information when the source and output container support it |
+| Custom filename prefix | Enable and enter a prefix; the video ID is added to reduce filename collisions |
+
+Use **Save current settings as preset** or **Presets: apply / edit / delete / create** to reuse format, playlist, fragment-speed, subtitle, argument and extra-option choices. Applying a preset fills the form; it does **not** start a download. Recheck the populated fields before tapping Download. Presets do not save webpage URLs or account credentials; keep passwords, tokens and cookie headers out of custom commands.
+
+The **Simultaneous downloads / recordings** control opens the shared media limit even when reached through this panel. That queue setting affects eligible media tasks globally; see [Queue, retries and partial media](#queue-retries-and-partial-media).
+
 ### Updating the engine
 
 Use **Update yt-dlp** when a website changes or extraction starts failing. The app also checks for engine updates on a fresh launch when idle. Updating the engine is separate from installing a newer app APK and does not bypass account restrictions or DRM.
+
+### Share links and fallback
+
+Supported short/share links are resolved within their website family when possible. If a share link fails, open it in a browser and copy the full video/post URL. Use creator/channel links for monitoring rather than a share link to one post.
+
+Failure to verify a dedicated handler or redirect does not by itself make the original link unsupported: the app can continue through normal yt-dlp using the original submitted URL. This fallback still depends on yt-dlp, access, and the website. After certain access/detection failures while Main is visible, the app can open Browser Assist on that page; you must still complete any prompt and play/detect the video. Use the Browser-assisted download button if it does not open automatically.
 
 ## Cookies and signed-in downloads
 
@@ -106,7 +156,7 @@ If the add-on is unavailable in your Firefox version or cannot export, use a des
 
 ### Chrome: desktop export method
 
-Chrome for Android does not support installing normal desktop cookie-export extensions.
+Use a desktop browser for the Chrome extension workflow below; do not assume a desktop extension can be installed in your Android browser.
 
 1. Sign into the website in Chrome on a computer.
 2. Use a trusted cookie-export extension to save Netscape-format cookies for that website.
@@ -118,17 +168,11 @@ A desktop Firefox export can be used the same way.
 
 ### Two separate sign-in sessions
 
-Imported cookies are supplied to **yt-dlp downloads**. **Browser Assist** uses its own embedded WebView session. Importing cookies does not log you into Browser Assist, and signing into Browser Assist does not automatically replace your imported cookie file.
+The external browser that exported `cookies.txt` and the app's embedded WebView profile are separate sessions. Importing a cookie file does not log you into Browser Assist or the monitoring browser. Signing into the embedded browser does not replace your imported file.
 
-On some websites, including social media sites such as X and Instagram, the following sequence may help:
+The app's browser-assisted and monitoring views use the existing persistent WebView profile, so saved cookies/local storage can be reused where the website permits it. State restricted to a particular tab (`sessionStorage`) is not copied to a new background view. Some direct monitoring requests also use applicable imported/browser cookies; this does not guarantee the same access as an interactive browser.
 
-1. Open the post in Browser Assist.
-2. Sign in and reveal the content if prompted.
-3. Return to the main screen.
-4. Import cookies from your signed-in external browser if needed.
-5. Paste the full post URL and tap **Download**.
-
-This is a troubleshooting workflow, not a guarantee that the two browser sessions are shared.
+If a website requires an account, either import a fresh cookie file for the normal download or sign in through the relevant embedded browser and retest. A public page loading successfully does not prove that login was reused. See [Monitoring sign-in and recovery](#monitoring-sign-in-and-recovery).
 
 **Keep cookies private.** They can grant access to your account. Never upload cookie files to GitHub, attach them to public issues, or include them in screenshots. Remove imported cookies when no longer needed and export again if the session expires.
 
@@ -141,6 +185,16 @@ This is a troubleshooting workflow, not a guarantee that the two browser session
 5. Tap **Detect and download**.
 
 This detects a media address and hands it to the regular download engine. It is separate from continuous stream recording.
+
+### Multiple sources and Download all
+
+When detection presents several sources, choose one to download it, or use **Download all** to put each listed source into the shared media queue. This is a download feature, not a command to record every source at once. Review the list: entries may be alternate renditions or duplicate-looking sources rather than different videos. If audio-only entries are included, the app asks for confirmation; they still will not become video files.
+
+### Page zoom and app-opening links
+
+Use the separate **Zoom out**, **Zoom in**, and **Reset zoom** buttons in the browser controls. Zoom out if a website dialog or its lower buttons are clipped. These controls change page presentation without reloading or replacing the download/recording controls.
+
+If any website attempts to open its native app, the browser tries to retain web navigation or recover an appropriate web destination when it can. Not every app link has a usable web equivalent. If the page cannot proceed, use the full HTTPS video/post URL; use normal Download with your cookies when appropriate. The app does not need to launch the website's native app to download a web video.
 
 ### When detection finds the wrong thing
 
@@ -155,6 +209,156 @@ Captured URLs can expire or be tied to the current network/IP. Reopen the page a
 Some sites show a blank white page after **Continue with Google** inside Browser Assist. Return to the site's login page and use its email/username and password method, if available. This issue can affect both assisted downloading and assisted recording.
 
 The white page does not establish that your account login failed; it indicates a problem with that embedded sign-in flow. Do not keep submitting credentials to an invisible page.
+
+## Website support and dedicated handlers
+
+Support has several layers: an app-specific route, the installed yt-dlp extractor, and interactive Browser Assist. **Recognized** does not mean that video download, live recording, upload monitoring, and live monitoring are all implemented for that site. The following describes routes in the app, not a live availability test of every service.
+
+### Dedicated download and playback support
+
+| Website/family | App route and useful limits |
+| --- | --- |
+| AniWaves | Individual episode playback; SUB, S-Sub, DUB and available server choices; supported series episode listings |
+| h123movies | Individual movie/episode playback; Website default or English audio and website server selection; compatible listing discovery |
+| WCOStream | Individual episode playback and supported series listings |
+| Bluesky, Instagram, Threads, Facebook, Reddit, Snapchat, Tumblr, TikTok, Pinterest | Public-post video resolution for supported post/share-link shapes, then normal yt-dlp fallback if no verified public video is found |
+| Mastodon | A public-post route for `mastodon.social`; other instances are not automatically covered by that dedicated route |
+| Internet Archive, Dailymotion, Newgrounds, selected PeerTube instances, RuTube, Vimeo | App-specific recorded-video preparation for supported exact page routes, with fallback where applicable |
+| Bilibili International, Kick, Niconico, Odysee, SOOP, VK Video | Additional recognized video/channel route families; preparation can depend on yt-dlp and the particular page |
+| Rumble | App-specific live handling; recorded-video downloading must use an available fallback rather than assuming the live adapter covers VODs |
+| YouTube, Twitch, X and other yt-dlp-supported pages | Existing extractor paths remain useful; having no separate public-post adapter does not make a site unsupported |
+
+Bilibili International refers to `bilibili.tv`, not a promise of equivalent coverage for `bilibili.com`. The capture-based PeerTube routes explicitly recognize `peer.tube` and `lostpod.space`; other instances may work through yt-dlp or a tested custom source. Site-specific paths do not promise access to private, paid, age-gated, deleted, or geographically restricted material.
+
+For AniWaves, h123movies and WCOStream, use the individual episode/movie page for a manual download. Keep website playback choices separate from subtitle-file settings. **Automatic** may try available options; an explicitly selected server/audio group is not a promise that the server works, nor permission to silently substitute another selection. Browser Assist lets you choose the intended option interactively.
+
+For h123movies English audio, missing/inconclusive language metadata is reported as a warning when otherwise valid processed media can be exported. It does not prove the track is non-English. A track explicitly tagged as a different language is a different case; review the error and retained media. The app does not deliberately substitute another language for an explicit English request.
+
+A compatible moved domain can be recognized from page/player evidence. A lookalike hostname is not enough. If no dedicated handler is verified, the original submitted link can still go to the normal downloader.
+
+### Dedicated monitoring support
+
+These distinctions apply to **Monitoring**, independently of the download table above. A route must still pass current source/ownership/live checks before automation uses it.
+
+| Source | Upload monitoring | Live monitoring / recording preparation |
+| --- | --- | --- |
+| YouTube | Built-in channel extraction and baseline handling | Built-in live discovery, fresh extraction and eligible browser recovery; some audio/stream-discovery failures remain in 1.0.63 |
+| Twitch | Built-in videos/archives/clips extractor routes where exposed | Built-in channel/live extraction; fresh playback preparation and eligible browser recovery |
+| AniWaves, h123movies, WCOStream | Supported series/category/episode listing discovery | These episode/movie handlers do not establish live-stream support |
+| Dailymotion | Dedicated creator-scoped public upload checks | Requires another successful extractor/custom live path; recorded-video support alone is insufficient |
+| Kick | Dedicated public channel-recording checks and scoped extractor fallback | Recognized live-channel route; playback depends on successful extractor verification |
+| Odysee | Dedicated signed creator/claim-scoped upload checks | Dedicated public live-state/playback checks, with fresh playlist verification |
+| PeerTube, recognized instances | Dedicated public video-channel checks | No dedicated live guarantee from the recorded-video/upload adapter |
+| RuTube | Dedicated verification for a supported season anchored by its seed video; not every creator feed | No dedicated live guarantee from that season adapter |
+| Niconico, Newgrounds | Ownership-checked user extractors on supported user listing routes | No dedicated live guarantee from upload support |
+| Rumble | Candidate listings can remain preview-only | Dedicated public live-post checks and limited creator-to-broadcast lookup when ownership can be verified |
+| VK Video / VK Video Live | Candidate listings can remain preview-only | Dedicated public dynamic-DASH checks for supported `live.vkvideo.ru` channels |
+| Bilibili International, Vimeo, SOOP and other recognized listing routes | Some routes expose candidates for review; preview-only results do not automatically queue uploads | SOOP has recognized live routes using extractor fallback; recognition alone does not confirm working playback |
+| Chaturbate | Not implied by the live-status handler | Dedicated live-status probing with eligible saved-session browser recovery and fresh playback checks |
+| Stripchat, XHamsterLive | Not implied by the live-status handler | Live-status recognition exists; the automatic handoff directs these custom live players to Browser Assist for fresh observations |
+| Picarto | Not implied by the live-status probe | Live-status probing plus compatible playback extraction where available |
+| Social post sites and other pages | No blanket claim of dedicated social profile monitoring | Public-post downloads do not establish dedicated live monitoring; use and test a custom source or an available extractor path |
+
+Capture-based monitoring routes are bound to eligible rules when saved. An existing rule can retain its previous route; adding new handlers does not rewrite every saved rule. Do not delete a working custom rule just because the app now recognizes its website.
+
+A preview may include recommendations or links whose ownership is unverified. The app can show those candidates while leaving automatic queueing paused. Do not treat a preview as a completed baseline or proof of creator monitoring.
+
+## Queue, retries and partial media
+
+Open **Queue & history** from Main or the shared queue control on Monitoring.
+
+- **Simultaneous downloads / recordings** sets the shared media limit. The default is one. Preparing, recording/downloading, and final saving can occupy a slot.
+- Live tasks have priority, followed by retries, then other downloads. **Move up** and **Move down** reorder eligible queued tasks. **Record now…** can prioritize a live task; read the confirmation because an active task may be stopped/saved first.
+- **Pause after current** pauses queue dispatch after active work. It does not pause all monitoring rules. Resume the queue when ready.
+- Queued settings are snapshots; changing Main's current fields is not a guarantee that an existing queued request changes. Use the task's fresh retry/detection action when appropriate.
+- Collections have separate transfer coordination. Clearing completed history is not the same as deleting saved media or recovery data.
+
+### A held task with nothing else running
+
+A monitoring task can be **held** while waiting to retry its own preparation. It is not necessarily waiting for another download. Deferred preparations show the reason and a retry countdown; a due retry can still wait for Android or an available slot. Check the task details and full monitoring log rather than inferring an occupied queue from the word “held.”
+
+### Retained downloads and recovery
+
+| Action, when offered | Purpose |
+| --- | --- |
+| Retry with fresh detection | Resolve the media again and reuse compatible retained fragments where possible |
+| Save partial video | Export playable retained material; it may be incomplete or have gaps/missing audio |
+| Recover retained video locally / Recover video from retained fragments | Attempt local reconstruction from retained data |
+| Export fragment diagnostics | Produce inspection information for a retained download |
+| Export sample fragments | Export actual sample media for investigation; inspect before sharing |
+| Remove recovery files | Delete retained recovery material after you no longer need it |
+
+Retained data is not proof that a full video was downloaded. Keep it until the saved result is checked. A fresh signed URL can differ from the old one; compatible pieces may be reused, but the app must not combine unrelated media merely because filenames resemble each other.
+
+After a process interruption, review tasks marked **interrupted**. Recording cannot recover time that was never captured. Install updates over the existing app if you want to preserve queued settings/history and recovery files.
+
+## Monitoring
+
+Monitoring checks channels/profiles/series for **future uploads**, **live streams**, or both. It is separate from downloading one existing post.
+
+1. Open Monitoring and tap **Add monitoring link**.
+2. Enter a name and the channel/profile or series/season URL. Use a specific video URL on Main for a one-off download instead.
+3. Choose the uploads/live mode, action, interval, allowed days, time window, and time zone shown by the rule editor.
+4. Choose a compatible built-in route or a tested custom source. Review [Dedicated monitoring support](#dedicated-monitoring-support).
+5. Save, use **Check now**, and inspect the source status and discovered items.
+6. Test a short automatic task through final saving before relying on a long unattended session.
+
+### Baseline and schedules
+
+The first successful upload check establishes a baseline of the items the source exposes; existing uploads are not automatically downloaded just because they were present at setup. New unseen items found later can notify or enter the queue according to the rule. Many channel checks inspect a bounded recent list, not a full lifetime archive. A long interval can miss short broadcasts or items that leave that recent list.
+
+Each rule has its own schedule. The editor supports allowed days, time windows and a time zone, including overnight windows. Checks are approximate: Android background limits, battery restrictions, network availability, website limits and cooldowns can delay them. An enabled schedule is not an exact recording-start guarantee.
+
+Allow notifications and review **Background / battery settings**. Use **Check now** with the app visible when troubleshooting. A validated network does not establish that the website accepted the request.
+
+A failed/blocked check keeps the prior baseline. Unknown is not offline. Pausing a rule stops future checks but does not stop a recording already running; stopping a recording does not by itself disable its rule. Pause the live rule as well if you want that ongoing broadcast to remain stopped.
+
+### Live discovery versus preparation
+
+A channel can be correctly detected as live while fresh recording preparation still fails. Preparation needs the intended broadcast's usable media, access and audio evidence. Android accepting foreground preparation does not mean recording has begun.
+
+In released **1.0.63**, automatic YouTube preparation can still fail to find matching audio or an observed HLS/DASH stream even when Browser Assist works. The background detector checks requests and resource history; those checks do not discover an HLS address that the browser never requests.
+
+> **Unreleased fix — development 1.0.64:** later source adds complete-audio selection and recovery of an HLS address advertised by the exact live video's player data, including when playback uses SABR/UMP without an HLS request. The added master path checks audio grouping and advancing tracks before recording. These changes are not part of released 1.0.63 and still need end-to-end device verification.
+
+If preparation fails, inspect its reason and retry status. If Browser Assist works, use **Retry live stream in Browser Assist** where offered. For an already running but stalled recording, use its recovery control first to avoid starting a second task.
+
+### Monitoring sign-in and recovery
+
+Use **Browser mode / Saved session settings**, or the equivalent custom-source controls. Open the correct page, sign in yourself, and complete any agreement, age confirmation or verification. Try desktop mode if the mobile page omits the relevant content, then retest the source after changing modes.
+
+Where available, use **Save login & test session reuse**. Unique signed-in account text can help verify reuse; a public page loading alone is insufficient. Saved cookies/local storage can be shared with separate monitoring views, but per-tab storage is not copied and servers can expire sessions. Imported cookie files do not log you into those views.
+
+The app detects known visible prompts and reports interaction required instead of accepting them for you or marking the channel offline. After handling a prompt, retest reuse and use **Check now**. Automatic browser recovery is bounded; it is not a way around access controls or every website restriction.
+
+### Monitoring diagnostics
+
+Use **Copy detailed monitoring log** or **Save full detailed monitoring log**. The recent-events display is only part of the retained history. Individual queue task details are useful but can omit the underlying extraction/browser evidence.
+
+Logs can distinguish detection, exact source identity, saved-session reuse, player startup, observed/advertised stream evidence, audio verification, HTTP responses, retry scheduling, foreground service handoff, recording, finalization and saving. Attempt/rule identifiers help connect the stages. A status saying “live” is not a substitute for the recording-start and saved-file result.
+
+## Custom monitoring sources
+
+Use **Set up custom monitoring source** when a built-in route does not recognize the intended page. A custom recipe describes discovery rules; it does not add universal support to every website.
+
+1. Enter the channel/listing address and open it in the setup browser.
+2. Sign in, handle prompts, and load more entries as needed.
+3. Use **Find example posts / videos** and select two or more distinct examples from the same intended list. Avoid recommendations and unrelated creators.
+4. Use **Test learned rules, reload & review**. Confirm that the intended entries are found again after reload.
+5. For live mode, teach the visible status/live destination and use **Test live destination / playback**. Upload testing does not validate live recording, or vice versa.
+6. Save and choose the source on a monitoring rule. Supply that rule's actual channel URL; do not assume the teaching example is the monitored channel automatically.
+
+Use Advanced settings only when needed, and retest after changing the source, channel, mode or browser setting. Import a custom source only from a source you trust and validate it locally. A shared recipe does not supply a working login session or a permanent signed stream URL. Keep existing working custom rules until a replacement has been tested.
+
+## Comic update monitoring
+
+On Monitoring, use **Add comic update rule** for one specific supported comic, chapter or album, rather than a search/tag/browse listing.
+
+Choose the destination folder, credentials where required, interval/days/window and whether to notify or download new pages. **Download existing pages on first successful check** is a separate option; leave it off for future pages only. Comic check intervals start at 15 minutes in the editor and remain approximate.
+
+The app can append newly discovered pages without overwriting saved files or changing your manual order. Failed checks retain the baseline. Replaced, inserted or reordered pages need review; they are not silently treated as simple appended pages. Use **Download pending pages / retry** when offered and keep the chosen folder permission available.
+
+PDFs are **not rebuilt automatically** after comic updates. Review the new order in Convert and make a new PDF when ready. Removing a monitoring rule keeps saved files.
 
 ## Live stream recording
 
@@ -177,7 +381,7 @@ Record a short sample before a long session. Confirm both the saved video and au
 - Long recordings can take time to align audio and save. Follow the displayed stage and progress; capture and saving are different stages.
 - If audio alignment gets stuck, another **Stop & save** request during that stage can skip alignment and preserve the original recording. Check the final status and timing report.
 
-The saved container can be TS or another supported recording container; recording does not promise an MP4 output. Files and recording diagnostics are saved under **Downloads/yt-dlp Mobile/Recordings**.
+The saved container can be TS or another supported recording container; recording does not promise an MP4 output. Browser-assisted recordings and their diagnostics are saved under **Downloads/yt-dlp Mobile/Recordings**. Automatic monitoring recordings use **Downloads/yt-dlp Mobile/Monitoring/Recordings**; use the task's final status for the actual destination.
 
 ## Stalls and recovery
 
@@ -247,11 +451,17 @@ The `12345`, comic titles, artist names, and tag names below are illustrative pl
 | Furbooru | `https://furbooru.org/images/12345` or supported `/search?q=...` and `/tags/...` links |
 | Rule34 | `https://rule34.xxx/index.php?page=post&s=list&tags=YOUR_TAGS` or `page=post&s=view&id=12345` |
 | Multporn | Supported `/comics/TITLE`, gallery, `/category/TAG`, `/characters/NAME`, and corresponding hentai listing paths |
-| Luscious | `https://www.luscious.net/albums/ALBUM_TITLE_12345/` or that album's reader link |
-| Tailspace | `https://tailspace.com/c/COMIC_TITLE` or `/artist/ARTIST/post/12345` |
+| Luscious | An individual `/albums/ALBUM_TITLE_12345/`, its reader link, or a supported `/albums/list/` listing |
+| Tailspace | `/c/COMIC_TITLE`, `/artist/ARTIST/post/12345`, or supported `/browse?tag=...` links |
+| nHentai | `/g/12345/` or supported tag/search/category listings |
+| Doujins, HentaiFox | Supported gallery links and exposed category/listing links |
+| Hentai2Read | Supported comic and individual chapter/reader links |
+| 8Muses | Supported album/comic/folder links and exposed listings |
+| AllPornComic, ILikeComix | Supported comic/chapter links and exposed listings |
+| MyHentaiGallery, Honeytoon, ComicPorn.xxx | Supported gallery/comic/chapter links and exposed listings; account-locked material is not guaranteed |
 | Yiffer | Supported legacy comic links; migrated pages may require Tailspace links |
 
-**Not supported in this version:** Luscious `/albums/list/` and Tailspace `/browse?tag=...` listings. Open an individual album/comic/post and paste its link instead. Some stale on-screen hints may say collection downloads will be added later; the download feature exists, but supported page types remain limited.
+Luscious album listings and Tailspace browse listings now have collection handlers. They follow exposed album/comic links and pagination; infinite-scroll-only, inaccessible or changed layouts can still prevent complete coverage. The added collection families likewise depend on their supported reader/listing structure. If a listing fails, try the specific album, comic or chapter. The site home page or an account page is not a collection just because the hostname is recognized.
 
 ### Credentials
 
@@ -328,6 +538,14 @@ Filenames on the companion-video page are intended to be clickable. A viewer may
 | White page after Google login | Return and use the site's email/username-password login if offered |
 | Only audio or a tiny file saved | Use the full webpage URL with Download; import cookies if needed |
 | No media detected | Finish ads/checks and play the actual video for several seconds before detecting again |
+| Website prompt is cut off | Use Zoom out in the browser controls, complete the prompt yourself, then reset zoom if desired |
+| Website tries to open its native app | Use the full HTTPS page URL; automatic web-link recovery is possible only when a usable web destination exists |
+| Held task but queue otherwise empty | Read the preparation reason/countdown; it can be waiting to retry itself |
+| Live detected but recording never starts | Save the full monitoring log; detection, player/stream/audio verification and service startup are separate stages |
+| Monitoring is late | Review allowed windows/time zone, notifications, background/battery settings and network; test Check now with the app visible |
+| Monitoring says interaction required | Open its browser, complete the prompt/sign-in, retest saved-session reuse, then Check now |
+| Candidates visible but uploads are not queued | A preview can lack creator-ownership verification; test a supported route or custom source instead of assuming a successful baseline |
+| English language is unverified after processing | Read the warning and check the saved audio; missing language metadata alone does not prove another language |
 | HTTP 403 | The server rejected access; retry the appropriate authenticated workflow or recording recovery |
 | HTTP 429 | Reduce repeated requests and parallelism, then wait before retrying |
 | Expired URL / HTTP 410 | Reopen Browser Assist and detect a fresh media URL |
@@ -335,8 +553,8 @@ Filenames on the companion-video page are intended to be clickable. A viewer may
 | Saving takes a long time | Follow finalization progress; embedding large videos or processing long recordings can take time |
 | Alignment is stuck | During audio finalization, another Stop & save can skip alignment and retain the original; check the reported result |
 | Collection finds no files | Verify supported page type, credentials, verification state, and whether the site changed |
-| Luscious says Album ID not found for `/albums/list/` | Use an individual album URL; listing support is not implemented |
-| Tailspace browse link fails | Use an individual `/c/...` or artist-post link |
+| Luscious listing fails | Listing support exists; verify exposed album links/access, or try the individual album URL |
+| Tailspace browse link fails | Check exposed comic links/pagination, or try an individual `/c/...` or artist-post link |
 | PDF link says File not found | Confirm separate file access, or create an embedded PDF and use a viewer supporting attachments |
 | PDF attachment is not visible | Check the viewer's attachment panel or extract/open using a viewer with attachment support |
 
@@ -350,6 +568,9 @@ Provide:
 - The feature used and steps/buttons that led to the issue.
 - Whether it works on another network, without a VPN, or with the screen on, if you tested that.
 - The error message and **Copy diagnostic log** or **Copy collection log** output.
+- For monitoring, the mode (uploads/live/both), built-in versus custom source, interval/window/time zone, individual task details, and **Save full detailed monitoring log** output. Include whether the same broadcast works in Browser Assist.
+- For display issues, the theme/orientation, screen, and whether you were rotating, typing, scrolling or opening a dialog.
+- For dedicated website handlers, the selected server, audio/language group, and whether Automatic or an explicit choice was used.
 - For recordings, relevant HTTP event/timing files and whether the saved file has video, audio, and correct timing.
 - For PDF problems, the PDF viewer and whether videos were linked or embedded.
 
