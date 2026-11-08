@@ -1,6 +1,6 @@
 # yt-dlp-Mobile
 
-An Android app for downloading video and audio, recording live streams, saving image and comic collections, and turning ordered comic pages into PDFs.
+An Android app for downloading video and audio, recording live streams, saving image and comic collections, and turning ordered comic pages into PDFs. As well as monitoring for download / recording video, live stream, and comics
 
 Media processing runs on the device. The app uses yt-dlp for regular downloads, an embedded browser for assisted capture, and FFmpeg for media processing.
 
