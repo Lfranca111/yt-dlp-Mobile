@@ -79,6 +79,12 @@ class CollectionConvertService : Service() {
         worker = Thread({
             var outputUri: Uri? = null
             try {
+                val inputs=images+if(embedVideos) (0 until (videoUris?.length() ?: 0)).map { Uri.parse(videoUris!!.getString(it)) } else emptyList()
+                val knownBytes=inputs.fold(0L) { total,uri ->
+                    val bytes=runCatching { contentResolver.query(uri,arrayOf(android.provider.OpenableColumns.SIZE),null,null,null)?.use { if(it.moveToFirst() && !it.isNull(0)) it.getLong(0) else 0L } ?: 0L }.getOrDefault(0)
+                    if(bytes>0 && total<=Long.MAX_VALUE-bytes) total+bytes else total
+                }
+                StorageGuard.destination(this,knownBytes,destination)
                 outputUri = DocumentsContract.createDocument(contentResolver, destination,
                     "application/pdf", "$title.pdf") ?: error("Cannot create a PDF in the selected folder.")
                 contentResolver.openOutputStream(outputUri!!, "w")?.use { output ->
@@ -101,7 +107,8 @@ class CollectionConvertService : Service() {
             } catch (_: InterruptedException) {
                 update("Conversion cancelled; incomplete PDF removed. Originals kept.")
             } catch (error: Exception) {
-                update("PDF conversion failed at page ${CollectionConvertState.done + 1}: ${error.message}")
+                update(if(StorageGuard.failure(error)) "Not enough storage space for the PDF. Free space and convert again. Original images and videos are kept."
+                    else "PDF conversion failed at page ${CollectionConvertState.done + 1}: ${error.message}")
             } finally {
                 request.delete()
                 outputUri?.let { runCatching { DocumentsContract.deleteDocument(contentResolver, it) } }

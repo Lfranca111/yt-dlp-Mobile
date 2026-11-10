@@ -1,6 +1,6 @@
 # Building yt-dlp Mobile
 
-This guide covers the released **1.0.63** project and preparation of later updates. Development 1.0.64 is subsequent, unreleased work. Use the checked-in Gradle configuration as the authority for exact versions; do not reset a working project to the earlier 1.0.0 planning metadata.
+This guide covers the **1.0.74 release target**, following the 1.0.63 public baseline. Use the checked-in Gradle configuration as the authority for exact versions.
 
 ## Required project files
 
@@ -28,7 +28,7 @@ Keep the Gradle wrapper JAR and properties file. Merge the documentation ZIP at 
 
 ### Changed-files updates
 
-Development source-update ZIPs contain only changed/new files. Apply them in order over the complete version stated in the patch README. Merge/replace matching files; do not delete the app folder or treat an incremental ZIP as a complete checkout. A 1.0.64 patch expects the complete 1.0.63 project underneath it. Documentation-only updates do not change app code, signing or version metadata.
+Development source-update ZIPs contain only changed/new files. Apply them in order over the complete version stated in the patch README. Merge/replace matching files; do not delete the app folder or treat an incremental ZIP as a complete checkout. The 1.0.74 changed-files patch expects the complete 1.0.73 project. For an earlier install, use a complete source checkout of the intended version or apply the matching incremental updates in order. A public APK update does not require users to install each intermediate version.
 
 Keep a backup or commit before applying a patch. Compare the final source against the intended base and build the merged project, not just the ZIP contents.
 
@@ -70,26 +70,22 @@ chmod +x gradlew
 
 Unit tests do not substitute for WebView login, recording, SAF file access, theme/orientation changes, or PDF attachment tests on a device.
 
-Some existing desktop network-fixture tests use JDK APIs such as `jdk.httpserver` and `Files.readString`. Android Gradle plugin bootclasspath restrictions can prevent those tests from compiling even when production source compiles. A desktop JDK fixture harness is separate from the app's Android API compatibility. Record any harness limitation; do not claim a successful full test run when tests were not executed, or add desktop-only APIs to app runtime dependencies to hide it.
+Some network fixtures use `jdk.httpserver`. The Gradle configuration makes that API available to unit-test compilation without adding it to the Android app. Use a full JDK 17 that includes its module files.
 
 ### What development validation establishes
 
-The 1.0.63 source was compiled for debug/release in a temporary validation project. Its full JVM suite executed 625 tests successfully, with four additional tests skipped; 26 browser-script fixture assertions also passed.
-
-Subsequent **unreleased development 1.0.64** passed 633 executed JVM tests with four skipped and 52 browser-script assertions, including a supplied YouTube live player-response fixture without distributing its signed values. Those later fixes and test counts must not be presented as part of released 1.0.63.
-
-That environment disabled native-runtime packaging because it lacked the NDK and used separate JDK compilation for desktop Java fixtures. Those temporary settings are not part of the supplied app Gradle file and are not release build instructions. Re-run the required checks for the final release revision and test the exact signed APK; earlier source tests do not validate its native packaging, website access, or end-to-end phone recording.
+The full debug build and canonical unit suite passed on 1.0.71 (651 passed, two skipped). Later patches had focused source checks; 1.0.74 passed 22 focused tests and a host VK replay decode. A full Android build, unit suite and lint run for the final release revision, and checks of the exact signed APK, remain separate. See the [website coverage tables](USER_GUIDE.md#website-support-and-dedicated-handlers) for test evidence and limitations.
 
 ## Version and launcher icon
 
-In `app/build.gradle.kts`, the **released 1.0.63 baseline** is:
+In `app/build.gradle.kts`, the **1.0.74 release target** is:
 
 ```kotlin
-versionCode = 122
-versionName = "1.0.63"
+versionCode = 133
+versionName = "1.0.74"
 ```
 
-For a later public release, set its chosen release name and a code greater than every build it needs to update, including development APKs. Development 1.0.64 already uses code `123`; a later update must account for that code as well. Later bug fixes may already advance these values beyond the example. Do not lower the code to the earlier planned value `57`. The displayed version and monotonically increasing Android version code serve different purposes; installation compatibility also depends on the application ID and signing key.
+Check this code against builds already distributed to the intended audience. Android updates also depend on the application ID and signing key.
 
 Inside `<application>` in `app/src/main/AndroidManifest.xml`, use the generated launcher resources:
 
@@ -161,7 +157,8 @@ Use the final release source and the exact signed APK intended for distribution.
 - Test queue concurrency, priority, pause/resume, held preparation countdowns, fresh retry, retained fragments and partial export. Check recovery after an interrupted process without assuming missing live time can be recreated.
 - Test recording start, stop/save, discard, stall recovery, unattended timeout, audio timing and the saved file. Start a second recording after the first finishes.
 - Test upload baseline/new-item handling, live discovery/preparation, notify-only/automatic actions, independent rule schedules, allowed windows/time zones, network failures, foreground restrictions, restart restoration, and full log export.
-- For 1.0.63, check the known YouTube audio/stream-discovery limitations and Browser Assist recovery. When validating the later YouTube fixes, test complete-audio selection and player-data HLS recovery on the affected device. A successful captured-response fixture is not proof that a fresh signed playlist is accessible on the phone.
+- Test YouTube complete-audio selection, player-data HLS recovery, and startup fallback. Check VK upload monitoring with both link forms and verify live recording separately. Test Rumble with signed-in cookies and Vimeo playlist pairing in Browser Assist. A fixture or host check does not verify phone recording.
+- Run `lintDebug`; verify the full recording through the last frame and isolate the resume-cache fixture failures before treating them as app regressions.
 - Test saved-session reuse and visible agreement/login/verification prompts. Prompts must not be accepted automatically or misclassified as offline. Test uploads/live sections separately for custom monitoring sources.
 - Test comic initial/future-page behavior, failed checks retaining the baseline, pending-page retry, and no automatic PDF rebuilding or destructive page reorder/overwrite.
 - Test supported collections/listings, page order, folder permissions, linked/embedded PDF videos, and viewer limitations.

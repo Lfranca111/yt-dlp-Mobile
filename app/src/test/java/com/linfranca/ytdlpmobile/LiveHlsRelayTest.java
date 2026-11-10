@@ -3,6 +3,7 @@ package com.linfranca.ytdlpmobile;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import com.sun.net.httpserver.HttpServer;
 import java.net.HttpURLConnection;
@@ -154,7 +155,7 @@ public class LiveHlsRelayTest {
             if (relay != null) relay.close();
             origin.stop(0);
         }
-        String entries = Files.readString(log);
+        String entries = new String(Files.readAllBytes(log), StandardCharsets.UTF_8);
         assertTrue(entries.contains("video segment seq=12 HTTP=200"));
         assertTrue(entries.contains("audio playlist HTTP=200"));
         assertFalse(entries.contains("secret-token"));
@@ -191,6 +192,15 @@ public class LiveHlsRelayTest {
                 new LiveHlsRelay.Access("test", "", "c1", Map.of()), log.toFile())) {
                 assertFalse(relay.renew("video", base + "/different.m3u8?session=s2",
                     new LiveHlsRelay.Access("test", "", "c2", Map.of())));
+                long initialDeadline = System.currentTimeMillis() + 6_000;
+                while (!get(relay.videoUrl()).contains("/video/12.ts") &&
+                       System.currentTimeMillis() < initialDeadline) Thread.sleep(50);
+                assertTrue(get(relay.videoUrl()).contains("/video/12.ts"));
+                var current = new LiveHlsRelay.Access("test", "", "c1", Map.of());
+                assertFalse(relay.renew("video", base + "/video.m3u8?session=s1", current));
+                assertTrue(relay.renew("video", base + "/video.m3u8?session=s1", current, true));
+                assertFalse(relay.renew("video", base + "/different.m3u8", current, true));
+                assertTrue(get(relay.videoUrl()).contains("/video/12.ts"));
                 generation.set(2);
                 available.set(15);
                 var renewed = new LiveHlsRelay.Access("test", "", "c2", Map.of());
@@ -207,7 +217,7 @@ public class LiveHlsRelayTest {
                 assertTrue(refreshed, refreshed.contains("/video/15.ts"));
                 assertTrue(refreshed.contains("/video/12.ts"));
             }
-            String entries = Files.readString(log);
+            String entries = new String(Files.readAllBytes(log), StandardCharsets.UTF_8);
             assertTrue(entries.contains("renewal verified"));
             assertFalse(entries.contains("session=s2"));
         } finally {
@@ -304,4 +314,70 @@ public class LiveHlsRelayTest {
             Files.deleteIfExists(log);
         }
     }
+    @Test public void combinedRelayFollowsUpdatesAndFetchesEachSegmentOnce() throws Exception {
+        HttpServer origin = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicInteger sequence = new AtomicInteger(1), fetched = new AtomicInteger();
+        origin.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            String body;
+            if (path.endsWith(".m3u8")) {
+                int n = sequence.get();
+                body = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:" + n +
+                    "\n#EXTINF:1,\n/s" + n + ".ts\n#EXTINF:1,\n/s" + (n+1) + ".ts\n";
+            } else { fetched.incrementAndGet(); body = path; }
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (var stream = exchange.getResponseBody()) { stream.write(bytes); }
+        });
+        origin.start();
+        Path log = Files.createTempFile("combined-live", ".txt");
+        try {
+            String base = "http://127.0.0.1:" + origin.getAddress().getPort();
+            var access = new LiveHlsRelay.Access("test", "", "", Map.of());
+            try (var relay = new LiveHlsRelay(base + "/live.m3u8", access, log.toFile())) {
+                assertEquals(2, fetched.get());
+                sequence.set(2);
+                long until = System.currentTimeMillis() + 4000;
+                while (!get(relay.videoUrl()).contains("/video/3.ts") && System.currentTimeMillis() < until) Thread.sleep(50);
+                assertTrue(get(relay.videoUrl()).contains("/video/3.ts"));
+                assertEquals(3, fetched.get());
+                assertEquals("/s3.ts", get(relay.videoUrl().replace("video.m3u8", "video/3.ts")));
+            }
+        } finally { origin.stop(0); Files.deleteIfExists(log); }
+    }
+
+    @Test public void completedPartsFallbackRequiresFullDurationAndNeverBypasses403() throws Exception {
+        HttpServer origin = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicInteger status = new AtomicInteger(404), partsFetched = new AtomicInteger();
+        origin.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            String body;
+            int code = 200;
+            if (path.endsWith(".m3u8")) body = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n" +
+                "#EXT-X-PROGRAM-DATE-TIME:2026-10-10T10:00:00.000+0000\n" +
+                "#EXT-X-PART:DURATION=0.5,URI=\"/p1.m4s\"\n#EXT-X-PART:DURATION=0.5,URI=\"/p2.m4s\"\n" +
+                "#EXTINF:1,\n/complete.m4s\n";
+            else if (path.equals("/complete.m4s")) { code = status.get(); body = ""; }
+            else { partsFetched.incrementAndGet(); body = path.equals("/p1.m4s") ? "AA" : "BB"; }
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(code, bytes.length == 0 ? -1 : bytes.length);
+            try (var stream = exchange.getResponseBody()) { stream.write(bytes); }
+        });
+        origin.start();
+        Path log = Files.createTempFile("parts-live", ".txt");
+        try {
+            String base = "http://127.0.0.1:" + origin.getAddress().getPort();
+            var access = new LiveHlsRelay.Access("test", "", "", Map.of());
+            try (var relay = new LiveHlsRelay(base + "/live.m3u8", access, log.toFile())) {
+                assertEquals("AABB", get(relay.videoUrl().replace("video.m3u8", "video/1.m4s")));
+                assertTrue(get(relay.videoUrl()).contains("2026-10-10T10:00:00Z"));
+                assertEquals(2, partsFetched.get());
+            }
+            status.set(403); partsFetched.set(0);
+            try (var ignored = new LiveHlsRelay(base + "/live.m3u8", access, log.toFile())) {
+                fail("403 should prevent startup");
+            } catch (IllegalStateException expected) { assertEquals(0, partsFetched.get()); }
+        } finally { origin.stop(0); Files.deleteIfExists(log); }
+    }
+
 }

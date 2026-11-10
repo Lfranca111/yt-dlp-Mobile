@@ -3,9 +3,40 @@
         <item name="colorPrimary">@color/primary</item>
         <item name="colorPrimaryVariant">@color/primary_dark</item>
         <item name="colorSecondary">@color/accent</item>
-        <item name="android:statusBarColor">?attr/colorSurface</item>
-        <item name="android:navigationBarColor">?attr/colorSurface</item>
+        <item name="colorSurface">@color/polish_panel</item>
+        <item name="colorOnSurface">@color/polish_text</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="android:windowBackground">@color/polish_canvas</item>
+        <item name="android:colorBackground">@color/polish_canvas</item>
+        <item name="android:editTextStyle">@style/Widget.YtDlpMobile.RoundedEdit</item>
+        <item name="android:spinnerStyle">@style/Widget.YtDlpMobile.RoundedSpinner</item>
+        <item name="spinnerStyle">@style/Widget.YtDlpMobile.RoundedSpinner</item>
+        <item name="shapeAppearanceSmallComponent">@style/ShapeAppearance.YtDlpMobile.Rounded</item>
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.YtDlpMobile.RoundedPanel</item>
+        <item name="android:statusBarColor">@color/polish_canvas</item>
+        <item name="android:navigationBarColor">@color/polish_canvas</item>
         <item name="android:fontFamily">sans</item>
-        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">@bool/display_light_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/display_light_bars</item>
+    </style>
+    <style name="ShapeAppearance.YtDlpMobile.Rounded" parent="ShapeAppearance.MaterialComponents.SmallComponent">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">14dp</item>
+    </style>
+    <style name="ShapeAppearance.YtDlpMobile.RoundedPanel" parent="ShapeAppearance.MaterialComponents.MediumComponent">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">20dp</item>
+    </style>
+    <style name="Widget.YtDlpMobile.RoundedEdit" parent="Widget.AppCompat.EditText">
+        <item name="android:background">@drawable/polish_field</item>
+    </style>
+    <style name="Widget.YtDlpMobile.RoundedSpinner" parent="Widget.AppCompat.Spinner">
+        <item name="android:popupBackground">@drawable/polish_panel</item>
+    </style>
+    <style name="Theme.YtDlpMobile.Panel" parent="Theme.YtDlpMobile">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowBackground">@color/polish_canvas</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
 </resources>

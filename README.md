@@ -4,7 +4,7 @@ An Android app for downloading video and audio, recording live streams, saving i
 
 Media processing runs on the device. The app uses yt-dlp for regular downloads, an embedded browser for assisted capture, and FFmpeg for media processing.
 
-> **Current released version: 1.0.63.** These instructions describe that release. Later work, including the development 1.0.64 YouTube fixes, is listed separately under [Unreleased](CHANGELOG.md#unreleased). A listed route is not a guarantee that every website currently works.
+> **Documentation target: 1.0.74**, the planned update from 1.0.63. See the [changelog](CHANGELOG.md#1074--release-target) for what changed and GitHub Releases for the APK actually available. Website support varies by page and access.
 
 [Get started](#quick-start) · [User Guide](docs/USER_GUIDE.md) · [Website and monitoring support](docs/USER_GUIDE.md#website-support-and-dedicated-handlers) · [Build Guide](docs/BUILDING.md) · [Changelog](CHANGELOG.md)
 
@@ -25,7 +25,7 @@ The APK is the installable app. GitHub's **Source code (zip)** and **Source code
 - Choose MP4 compatibility, best available quality, Original/site-selected format, MP3, or M4A.
 - Save reusable download presets and use optional resolution preferences, section cuts, selected playlist items, rate limits, thumbnails, metadata, chapters and filename prefixes.
 - Download full playlists and available subtitles, including automatic subtitles when offered, or save subtitle files without a video.
-- Import Netscape-format cookies for downloads that require your signed-in session.
+- Import Netscape-format cookies for downloads that require your signed-in session. Monitored downloads use the imported file when available, otherwise the saved in-app browser session.
 - Detect media through **Browser-assisted download** when a normal download fails; select one detected source or use **Download all** to queue the listed sources.
 - Use a shared media queue with task priorities, adjustable simultaneous downloads/recordings, retry controls, and retained partial-media recovery.
 - Monitor supported channels or series for future uploads and live broadcasts, with per-rule schedules, notify-only or automatic actions, saved-session checks, and detailed logs.
@@ -34,7 +34,8 @@ The APK is the installable app. GitHub's **Source code (zip)** and **Source code
 - Use dedicated website playback/public-post routes where verified, with normal yt-dlp fallback when no dedicated route applies.
 - Choose Dark, Light, or Follow device, and Follow Android, Portrait, or Landscape. Main-page navigation stays visible; secondary screens and browsers keep their own controls.
 - Use **Zoom out**, **Zoom in**, and **Reset zoom** in Browser Assist to reach clipped website controls without reloading the page.
-- Record supported live streams with **Stop & save**, diagnostic logs, and audio timeline processing.
+- Record supported live streams with **Stop & save**, diagnostic logs, and audio timeline processing. Concurrent manual tasks have individual controls.
+- Check for app updates and optionally back up APKs or export recovery settings. See [App updates and recovery](docs/USER_GUIDE.md#app-updates-and-recovery).
 - Try automatic recovery when stream URLs or session credentials stop working, with a manual recovery browser for unresolved 403 stalls.
 - Automatically stop and save an unresolved stall after five minutes without user interaction.
 - Download supported image, comic, album, post, and selected search-result collections.
@@ -82,27 +83,13 @@ See the [User Guide](docs/USER_GUIDE.md) for examples, cookies, recording recove
 
 Developers can use the [Build Guide](docs/BUILDING.md). Release changes are listed in the [Changelog](CHANGELOG.md).
 
-## Collection coverage
+## Website and collection coverage
 
-| Website family | Current collection paths |
-| --- | --- |
-| E621, E6AI, E926 | Individual posts and supported search-result links |
-| Furbooru | Individual images and supported search/tag-result links |
-| Rule34 | Individual posts and search-result links; API credentials required |
-| Multporn | Supported comic/gallery links and selected category/character listings |
-| Luscious | Individual albums/readers and supported album listings exposing album links/pagination |
-| Tailspace | Individual comics/artist posts and supported browse listings exposing comic links/pagination |
-| Yiffer | Supported legacy comic links; migration may affect availability |
-| nHentai, Doujins, HentaiFox, Hentai2Read | Supported gallery, comic/chapter, and exposed listing paths; coverage varies by site |
-| 8Muses, AllPornComic, ILikeComix, MyHentaiGallery, Honeytoon, ComicPorn.xxx | Supported comic/gallery/chapter/folder and exposed listing paths; locked or unexposed content is not guaranteed |
-
-The earlier Luscious album-list and Tailspace browse limitations have been superseded by listing handlers. They still depend on the links and pagination the website exposes; recognition is not proof that a full result set can be retrieved. See [Collections](docs/USER_GUIDE.md#collections).
-
-Video downloading, live recording, upload monitoring, and live monitoring have separate coverage. See the [support tables](docs/USER_GUIDE.md#website-support-and-dedicated-handlers), especially [Dedicated monitoring support](docs/USER_GUIDE.md#dedicated-monitoring-support). Public-post support on a social website does not imply dedicated monitoring for that website.
+See the [per-site support tables](docs/USER_GUIDE.md#website-support-and-dedicated-handlers) for supported links, test evidence, limits and credential requirements. Main downloads, upload monitoring, live discovery, live recording and Collections are separate capabilities.
 
 ## Important limitations
 
-- Website changes, authentication, human verification, network restrictions, and expired URLs can prevent downloads. An HTTP 403 alone does not establish the cause.
+- Website changes, authentication, human verification, network restrictions, and expired URLs can prevent downloads. Any website or media host can return HTTP 403. If the page requires sign-in, use Browser Assist or import cookies for a supported direct download; a 403 alone does not establish the cause.
 - Background monitoring times are approximate and may be delayed by Android, battery restrictions, network conditions, or website limits. A failed check preserves the baseline; it is not an offline result.
 - Saved browser sessions can expire. Imported cookies do not log you into the embedded browser, and browser state limited to a particular tab is not copied into background checks.
 - DRM-protected streams are unsupported.

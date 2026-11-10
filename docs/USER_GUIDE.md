@@ -1,11 +1,12 @@
 # yt-dlp Mobile User Guide
 
-This guide covers the released version **1.0.63**. Later development changes are recorded under [Unreleased](../CHANGELOG.md#unreleased) and are not automatically part of the installed release. Website support depends on the page type, the website's current behavior, and the installed yt-dlp engine.
+This guide covers the **1.0.74 release target**. See the [changelog](../CHANGELOG.md#1074--release-target) for changes since 1.0.63. Website support depends on page type, current site behavior and the installed yt-dlp engine.
 
 ## Contents
 
 - [Choosing the right screen and button](#choosing-the-right-screen-and-button)
 - [Appearance and display](#appearance-and-display)
+- [App updates and recovery](#app-updates-and-recovery)
 - [Regular video and audio downloads](#regular-video-and-audio-downloads)
 - [Cookies and signed-in downloads](#cookies-and-signed-in-downloads)
 - [Browser-assisted download](#browser-assisted-download)
@@ -52,6 +53,12 @@ Open **Appearance & display** on Main.
 **Follow Android** respects the device's rotation setting and rotation suggestion. Landscape uses a side rail on the main pages and rearranges browser controls beside the website. Scroll within a control panel if it does not fit. Theme/orientation changes are presentation settings; current forms and browser sessions are intended to stay open. Report lost input or interrupted tasks as a bug.
 
 Website colors inside Browser Assist are controlled by the website. The app's Light theme does not guarantee a light website.
+
+## App updates and recovery
+
+Open **Settings / App updates & recovery** on Main to check published stable app APKs, read release notes, and open Android's installer. This is separate from **Update yt-dlp**, which updates the engine. Android asks you to confirm installation. Finish active media tasks first.
+
+Optional APK backups keep the installed APK and one previous snapshot in your chosen folder. Android may reject downgrades. Uninstalling removes app-private data, including cookies, rules and recovery files; save the older APK and export settings first if you intend to uninstall. Recovery settings cover display settings, monitoring rules and custom-source templates, not cookies, queue history or media. Imported rules start disabled, and custom sources need local testing.
 
 ## Regular video and audio downloads
 
@@ -216,52 +223,59 @@ Support has several layers: an app-specific route, the installed yt-dlp extracto
 
 ### Dedicated download and playback support
 
-| Website/family | App route and useful limits |
-| --- | --- |
-| AniWaves | Individual episode playback; SUB, S-Sub, DUB and available server choices; supported series episode listings |
-| h123movies | Individual movie/episode playback; Website default or English audio and website server selection; compatible listing discovery |
-| WCOStream | Individual episode playback and supported series listings |
-| Bluesky, Instagram, Threads, Facebook, Reddit, Snapchat, Tumblr, TikTok, Pinterest | Public-post video resolution for supported post/share-link shapes, then normal yt-dlp fallback if no verified public video is found |
-| Mastodon | A public-post route for `mastodon.social`; other instances are not automatically covered by that dedicated route |
-| Internet Archive, Dailymotion, Newgrounds, selected PeerTube instances, RuTube, Vimeo | App-specific recorded-video preparation for supported exact page routes, with fallback where applicable |
-| Bilibili International, Kick, Niconico, Odysee, SOOP, VK Video | Additional recognized video/channel route families; preparation can depend on yt-dlp and the particular page |
-| Rumble | App-specific live handling; recorded-video downloading must use an available fallback rather than assuming the live adapter covers VODs |
-| YouTube, Twitch, X and other yt-dlp-supported pages | Existing extractor paths remain useful; having no separate public-post adapter does not make a site unsupported |
+This table also includes named extractor and monitoring routes. **Fixture** means a saved or synthetic page, link or response was checked. **Reachable** means the site responded. **Host** means a desktop test. None of these alone proves an Android download or recording. Where no end-to-end result is listed, the available reports do not establish one. A public page may still require verification or a session for playback.
 
-Bilibili International refers to `bilibili.tv`, not a promise of equivalent coverage for `bilibili.com`. The capture-based PeerTube routes explicitly recognize `peer.tube` and `lostpod.space`; other instances may work through yt-dlp or a tested custom source. Site-specific paths do not promise access to private, paid, age-gated, deleted, or geographically restricted material.
+| Website | App support | Testing and caveats | How to use it / credentials |
+| --- | --- | --- | --- |
+| AniWaves | Episode playback and series monitoring | Handler fixtures passed; moved-domain redirect observed. Audio and server availability vary. | Use an episode or supported series link. Choose SUB, S-Sub or DUB and the intended server; use Browser Assist if needed. |
+| h123movies | Movie/episode playback and compatible listings | Handler fixtures passed; moved-domain redirect observed. Inconclusive English metadata can warn without blocking a valid export. | Use the individual title and select the audio/server. Use Browser Assist if the player needs interaction. |
+| WCOStream | Episode playback and supported series | Handler fixtures passed; no end-to-end site result. | Use the episode. In Browser Assist, wait for the countdown, tap **Close** if offered and play the episode. |
+| Bluesky | Exact public video post | Post/route evidence; no end-to-end result or dedicated profile monitoring. | Use the public post permalink containing video. No credentials established. |
+| Instagram | Public post/Reel video and extractor fallback | Post-route evidence; no end-to-end result. Automated access can fail even on a visible post. | Use the specific post or Reel. If sign-in is required, use an authorized browser session or import cookies for direct extraction. |
+| Threads | Exact public post video | Post-route evidence; no end-to-end result or dedicated profile monitoring. | Use an individual post on threads.com or threads.net. Try Browser Assist if playback works there. |
+| Facebook | Public Reel/video and share redirects; extractor-based monitoring | Route evidence; no end-to-end result. Private/group access varies. | Use the individual Reel or video; sign in with an account that can view it if required. |
+| Reddit | Public video post and share redirects | Route evidence; no end-to-end result. Its metadata API can reject access. | Use the post permalink; try Browser Assist if it plays there. |
+| Snapchat | Public Spotlight and supported share redirects | Route evidence; no end-to-end result. Stories/private media are not implied. | Use the Spotlight link or copy the final web address from the share link. |
+| Tumblr | Exact public video post | Route evidence; no end-to-end result. Some posts embed another provider. | Use the post permalink or the external video's page. |
+| TikTok | Individual video and share redirects; extractor-based monitoring | User confirmed the tested function worked. Earlier link failure was not established as site-wide. | Use a current video permalink or supported share link. No mandatory credentials established for the working sample. |
+| Pinterest | Public video Pin and short links | Route evidence; no end-to-end result. Image-only Pins have no video. | Open the video Pin; try Browser Assist if prompted. |
+| Mastodon (mastodon.social) | Exact public status video | Route evidence; no end-to-end result. Dedicated route is instance-specific. | Use the status permalink; try yt-dlp or a tested custom source on other instances. |
+| Internet Archive | Item details and recorded-media preparation | Host reachable; route evidence. Restricted items are not guaranteed. | Use an individual item details page. |
+| Dailymotion | Videos and creator-scoped public uploads | Host reachable; route evidence. No dedicated live result. | Use a video on Main or the creator profile in Monitoring. |
+| Newgrounds | Movie preparation and supported user listings | Host probe got 403. User confirmed sign-in or a cookie file was needed in their test. | Sign in to Newgrounds in Browser Assist or import cookies from your signed-in session. Use a movie link for Main or the creator’s Movies page for Monitoring. |
+| PeerTube (peer.tube) | Public videos and video-channel monitoring | Host reachable; route evidence. No dedicated live result. | Use the individual video or video-channel link. Instance access rules vary. |
+| PeerTube (lostpod.space) | Public videos and video-channel monitoring | Host reachable; route evidence. No dedicated live result. | Use the individual video or video-channel link on this instance. Other instances are not implied. |
+| RuTube | Recorded videos and supported season monitoring | Host reachable; route evidence. Generic feeds and live recording are not established. | Use an individual video or the supported season anchored by its seed video. |
+| Vimeo | Video download and paired playlist recovery in Browser Assist | Matching video/audio playlists and an apparently completed Android task observed; phone playback not checked. Paired fixture decoded with both tracks. | Play the video in Browser Assist and detect it if Main fails. No imported cookie file was needed in the observed assisted run. |
+| Bilibili International (bilibili.tv) | Video and creator-space routes | Host reachable; route evidence. No end-to-end app result. | Use the International video or creator-space link. |
+| Bilibili (bilibili.com) | Named extractor-based monitoring route | No end-to-end result for this host. The International route is separate. | Test the creator profile before enabling automation. |
+| Kick | Video/channel routes and verified public recordings | Host reachable; route evidence. Android live capture is not established. | Use a recording or channel link; live depends on verified current playback. |
+| Niconico | Watch links and ownership-checked user uploads | Route logic checked; no end-to-end result. | Use a watch link or user video listing. Sign in if the requested page requires it. |
+| Odysee | Public videos, creator uploads and public live preparation | Host reachable; route evidence. Actual recording still needs validation. | Use the video or creator claim. Protected streams are excluded. |
+| SOOP | VOD and live station routes | Route checks; no end-to-end live result. | Use a specific VOD or station root. Sign in if the station requires it. |
+| Rumble | yt-dlp for recorded videos; creator uploads and public live checks | Signed-in cookies fixed the tested direct download. Browser Assist transferred fragments before stopping; completion was not verified. Upload verification passed focused tests; automatic download and live recording remain unverified. | For the tested embed 403, import cookies from a signed-in Rumble session or play it in Browser Assist. Unverified creator listings stay preview-only. |
+| VK (vk.com) | Named extractor-based monitoring route | Earlier host probe got 418; no end-to-end result. | Try the exact video/channel with yt-dlp or Browser Assist. The status alone does not establish a cookie requirement. |
+| VK Video (vkvideo.ru) | Individual videos and recognized creator video listings | Route evidence; no separate end-to-end result. | Use the video or supported creator videos link. Separate from VK Video Live. |
+| VK Video Live (live.vkvideo.ru) | Live discovery and finished replay monitoring | Phone detected live tracks on the root; both link forms found the same 40 replays in captures. A host replay decoded with both tracks. Host live capture got 403; Android automation/live recording remain unverified. | Use the root or /records; Live uses the root, Uploads can try /records. Use a replay permalink on Main. No login requirement confirmed for the host replay. |
+| YouTube | Video downloads and upload/live monitoring | Host video metadata passed; live recovery passed fixtures. These do not verify all Android recordings. | Use a watch page or channel. If the site requires a session, import signed-in cookies for Main or sign in through Browser Assist. |
+| Twitch | Videos, archives/clips and channel live monitoring | Homepage GET succeeded; no current end-to-end app recording result. | Use the clip/VOD or channel root. Subscriber-only streams require authorized access. |
+| X | Extractor downloads and named profile monitoring | The user reported needing a signed-in cookie file for direct download. Automatic monitoring downloads were not verified. | Use the post link or creator profile as appropriate. Try cookies from a signed-in X session for direct download or sign in through Browser Assist. |
+| BitChute | Named extractor-based monitoring route | No end-to-end result. | Use the exact video or test the creator link before enabling automation. |
+| CHZZK | Named extractor-based monitoring route | No end-to-end result. | Use the channel and test playback before enabling recording. |
+| Huya | Named extractor-based monitoring route | No end-to-end result. | Use the live room; stream access varies. |
+| Douyu | Named extractor-based monitoring route | No end-to-end result. | Use the live room; complete any sign-in or verification yourself. |
+| Chaturbate | Live-status probe and eligible saved-session recovery | Prior live playback evidence does not verify automatic recording for every room. | Use the room link and complete any agreement or verification in the in-app browser. |
+| Stripchat | Live-status recognition and Browser Assist handoff | Recognition alone does not establish automatic capture; fresh browser observations are needed. | Open the room in Browser Assist and play the intended stream after any prompts. |
+| XHamsterLive | Live-status recognition and Browser Assist handoff | Recognition alone does not establish automatic capture. | Open the exact room in Browser Assist and play it after any prompts. |
+| Picarto | Live-status probe and compatible extractor playback | Route evidence; no current end-to-end recording result. | Use the creator's live page. Try Browser Assist if preparation fails. |
 
-For AniWaves, h123movies and WCOStream, use the individual episode/movie page for a manual download. Keep website playback choices separate from subtitle-file settings. **Automatic** may try available options; an explicitly selected server/audio group is not a promise that the server works, nor permission to silently substitute another selection. Browser Assist lets you choose the intended option interactively.
-
-For h123movies English audio, missing/inconclusive language metadata is reported as a warning when otherwise valid processed media can be exported. It does not prove the track is non-English. A track explicitly tagged as a different language is a different case; review the error and retained media. The app does not deliberately substitute another language for an explicit English request.
-
-A compatible moved domain can be recognized from page/player evidence. A lookalike hostname is not enough. If no dedicated handler is verified, the original submitted link can still go to the normal downloader.
+For AniWaves, h123movies and WCOStream, an explicit selection does not authorize substituting a different server or audio track. A moved domain must provide matching page and player evidence.
 
 ### Dedicated monitoring support
 
-These distinctions apply to **Monitoring**, independently of the download table above. A route must still pass current source/ownership/live checks before automation uses it.
+Main download, upload detection, live detection and live recording are separate capabilities. Verify each rule with **Check now** before enabling automation. Preview-only results do not establish a baseline or queue downloads. Failed checks keep the existing baseline, and an unknown live state is not treated as offline. Existing custom rules are not automatically replaced.
 
-| Source | Upload monitoring | Live monitoring / recording preparation |
-| --- | --- | --- |
-| YouTube | Built-in channel extraction and baseline handling | Built-in live discovery, fresh extraction and eligible browser recovery; some audio/stream-discovery failures remain in 1.0.63 |
-| Twitch | Built-in videos/archives/clips extractor routes where exposed | Built-in channel/live extraction; fresh playback preparation and eligible browser recovery |
-| AniWaves, h123movies, WCOStream | Supported series/category/episode listing discovery | These episode/movie handlers do not establish live-stream support |
-| Dailymotion | Dedicated creator-scoped public upload checks | Requires another successful extractor/custom live path; recorded-video support alone is insufficient |
-| Kick | Dedicated public channel-recording checks and scoped extractor fallback | Recognized live-channel route; playback depends on successful extractor verification |
-| Odysee | Dedicated signed creator/claim-scoped upload checks | Dedicated public live-state/playback checks, with fresh playlist verification |
-| PeerTube, recognized instances | Dedicated public video-channel checks | No dedicated live guarantee from the recorded-video/upload adapter |
-| RuTube | Dedicated verification for a supported season anchored by its seed video; not every creator feed | No dedicated live guarantee from that season adapter |
-| Niconico, Newgrounds | Ownership-checked user extractors on supported user listing routes | No dedicated live guarantee from upload support |
-| Rumble | Candidate listings can remain preview-only | Dedicated public live-post checks and limited creator-to-broadcast lookup when ownership can be verified |
-| VK Video / VK Video Live | Candidate listings can remain preview-only | Dedicated public dynamic-DASH checks for supported `live.vkvideo.ru` channels |
-| Bilibili International, Vimeo, SOOP and other recognized listing routes | Some routes expose candidates for review; preview-only results do not automatically queue uploads | SOOP has recognized live routes using extractor fallback; recognition alone does not confirm working playback |
-| Chaturbate | Not implied by the live-status handler | Dedicated live-status probing with eligible saved-session browser recovery and fresh playback checks |
-| Stripchat, XHamsterLive | Not implied by the live-status handler | Live-status recognition exists; the automatic handoff directs these custom live players to Browser Assist for fresh observations |
-| Picarto | Not implied by the live-status probe | Live-status probing plus compatible playback extraction where available |
-| Social post sites and other pages | No blanket claim of dedicated social profile monitoring | Public-post downloads do not establish dedicated live monitoring; use and test a custom source or an available extractor path |
-
-Capture-based monitoring routes are bound to eligible rules when saved. An existing rule can retain its previous route; adding new handlers does not rewrite every saved rule. Do not delete a working custom rule just because the app now recognizes its website.
-
-A preview may include recommendations or links whose ownership is unverified. The app can show those candidates while leaving automatic queueing paused. Do not treat a preview as a completed baseline or proof of creator monitoring.
+For VK Video Live, either link form is accepted. Live checks the root, Uploads tries the saved link with a Records-tab fallback, and **Both** runs the checks separately.
 
 ## Queue, retries and partial media
 
@@ -317,9 +331,7 @@ A failed/blocked check keeps the prior baseline. Unknown is not offline. Pausing
 
 A channel can be correctly detected as live while fresh recording preparation still fails. Preparation needs the intended broadcast's usable media, access and audio evidence. Android accepting foreground preparation does not mean recording has begun.
 
-In released **1.0.63**, automatic YouTube preparation can still fail to find matching audio or an observed HLS/DASH stream even when Browser Assist works. The background detector checks requests and resource history; those checks do not discover an HLS address that the browser never requests.
-
-> **Unreleased fix — development 1.0.64:** later source adds complete-audio selection and recovery of an HLS address advertised by the exact live video's player data, including when playback uses SABR/UMP without an HLS request. The added master path checks audio grouping and advancing tracks before recording. These changes are not part of released 1.0.63 and still need end-to-end device verification.
+YouTube preparation prefers a complete audio/video format and can recover an HLS address advertised by the exact live video's player data even when the browser has not requested it. It checks for advancing tracks. If an eligible startup failure occurs before capture, it can try a fresh HLS route and then a yt-dlp watch-page fallback for the same still-live video.
 
 If preparation fails, inspect its reason and retry status. If Browser Assist works, use **Retry live stream in Browser Assist** where offered. For an already running but stalled recording, use its recovery control first to avoid starting a second task.
 
@@ -327,7 +339,7 @@ If preparation fails, inspect its reason and retry status. If Browser Assist wor
 
 Use **Browser mode / Saved session settings**, or the equivalent custom-source controls. Open the correct page, sign in yourself, and complete any agreement, age confirmation or verification. Try desktop mode if the mobile page omits the relevant content, then retest the source after changing modes.
 
-Where available, use **Save login & test session reuse**. Unique signed-in account text can help verify reuse; a public page loading alone is insufficient. Saved cookies/local storage can be shared with separate monitoring views, but per-tab storage is not copied and servers can expire sessions. Imported cookie files do not log you into those views.
+Where available, use **Save login & test session reuse**. Unique signed-in account text can help verify reuse; a public page loading alone is insufficient. Saved cookies/local storage can be shared with separate monitoring views, but per-tab storage is not copied and servers can expire sessions. Imported cookie files do not log you into those views. Monitored downloads use a fresh copy of an imported cookie file when available, otherwise they can use the saved in-app browser session. Failed access leaves the discovered item available for retry.
 
 The app detects known visible prompts and reports interaction required instead of accepting them for you or marking the channel offline. After handling a prompt, retest reuse and use **Check now**. Automatic browser recovery is bounded; it is not a way around access controls or every website restriction.
 
@@ -442,26 +454,29 @@ Search terms and filters come from supported input URLs; there is no need to typ
 
 ### Supported link examples
 
-The `12345`, comic titles, artist names, and tag names below are illustrative placeholders, not guaranteed existing posts.
+These examples describe checked route shapes. The available reports do not verify a current end-to-end download for every collection handler. Start with an individual accessible post, album or chapter if a listing fails.
 
-| Website | Example URL shape |
-| --- | --- |
-| E926 | `https://e926.net/posts/12345` or `https://e926.net/posts?tags=landscape` |
-| E621 / E6AI | Individual `/posts/ID` or supported `/posts?tags=...` links on the matching host |
-| Furbooru | `https://furbooru.org/images/12345` or supported `/search?q=...` and `/tags/...` links |
-| Rule34 | `https://rule34.xxx/index.php?page=post&s=list&tags=YOUR_TAGS` or `page=post&s=view&id=12345` |
-| Multporn | Supported `/comics/TITLE`, gallery, `/category/TAG`, `/characters/NAME`, and corresponding hentai listing paths |
-| Luscious | An individual `/albums/ALBUM_TITLE_12345/`, its reader link, or a supported `/albums/list/` listing |
-| Tailspace | `/c/COMIC_TITLE`, `/artist/ARTIST/post/12345`, or supported `/browse?tag=...` links |
-| nHentai | `/g/12345/` or supported tag/search/category listings |
-| Doujins, HentaiFox | Supported gallery links and exposed category/listing links |
-| Hentai2Read | Supported comic and individual chapter/reader links |
-| 8Muses | Supported album/comic/folder links and exposed listings |
-| AllPornComic, ILikeComix | Supported comic/chapter links and exposed listings |
-| MyHentaiGallery, Honeytoon, ComicPorn.xxx | Supported gallery/comic/chapter links and exposed listings; account-locked material is not guaranteed |
-| Yiffer | Supported legacy comic links; migrated pages may require Tailspace links |
-
-Luscious album listings and Tailspace browse listings now have collection handlers. They follow exposed album/comic links and pagination; infinite-scroll-only, inaccessible or changed layouts can still prevent complete coverage. The added collection families likewise depend on their supported reader/listing structure. If a listing fails, try the specific album, comic or chapter. The site home page or an account page is not a collection just because the hostname is recognized.
+| Website | Supported link / operation | Testing and caveats | How to use it / credentials |
+| --- | --- | --- | --- |
+| E926 | e926.net/posts/12345 or supported tag search | Route checks passed; later testing flagged E926 separately. A current reproducer or end-to-end pass is not available here. | Try an individual public post and capture the exact API error if it fails. Optional E621-family username and API key fields are available. |
+| E621 | Individual posts and tag searches | Route checks; API limits and filters apply. | Use the post/search link; enter your E621 username and API key if needed. |
+| E6AI | Individual posts and tag searches | Route checks; no current end-to-end result. | Use the matching host's link and username/API key if its API requires them. |
+| Furbooru | Individual images and search/tag results | Route checks; filters can affect results. | Try the image link; enter a Furbooru API key where needed. |
+| Rule34 | Individual posts and tag listings | Route/credential handling checked. Account settings may still reject valid-looking fields. | **Required:** numeric user ID and API key. See [Credentials](#credentials). |
+| Multporn | Comic/gallery and supported category/character listings | Route checks; dedicated video pages are separate. | Use an individual comic or gallery if listings omit links. |
+| Luscious | Individual albums, readers and album listings | Route/listing fixtures; unexposed pagination can limit completeness. | Start with an album or reader if the list fails. |
+| Tailspace | Comic, artist post and browse listings | Route/listing fixtures; dynamically loaded pages may be incomplete. | Use the exact comic or artist post. |
+| Yiffer | Legacy comic links | Route checks; migrated links may fail. | Use the corresponding Tailspace comic if the page moved. |
+| nHentai | Gallery and supported tag/category search | Route checks; current access/verification not confirmed. | Use an individual accessible gallery. A 403 alone does not prove sign-in is required. |
+| Doujins | Gallery and exposed listings | Route checks; no current end-to-end result. | Use the gallery if the listing does not expose links. |
+| HentaiFox | Gallery and exposed listings | Route checks; no current end-to-end result. | Use the gallery permalink. |
+| Hentai2Read | Comic, chapter and reader links | Route and reader fixture checks; website retrieval varies by comic. | Use the specific chapter/reader if pages are absent on the title page. |
+| 8Muses | Album/comic/folder and exposed listings | Route checks; locked items are not guaranteed. | Use the individual album/folder. |
+| AllPornComic | Comic, chapter and exposed listings | Route checks; no current end-to-end result. | Use the individual chapter if the listing fails. |
+| ILikeComix | Comic/chapter and exposed listings | Route checks; no current end-to-end result. | Use the individual comic/chapter and check page order. |
+| MyHentaiGallery | Gallery and exposed listings | Route checks; account-only pages are not guaranteed. | Use an individual accessible gallery. |
+| Honeytoon | Comic/chapter and exposed listings | Route checks; public titles may link to locked chapters. | Use an accessible chapter; paid/locked content is not guaranteed. |
+| ComicPorn.xxx | Gallery/chapter and exposed listings | Route checks; no current end-to-end result. | Use the specific accessible gallery, not the home or account page. |
 
 ### Credentials
 
@@ -546,7 +561,7 @@ Filenames on the companion-video page are intended to be clickable. A viewer may
 | Monitoring says interaction required | Open its browser, complete the prompt/sign-in, retest saved-session reuse, then Check now |
 | Candidates visible but uploads are not queued | A preview can lack creator-ownership verification; test a supported route or custom source instead of assuming a successful baseline |
 | English language is unverified after processing | Read the warning and check the saved audio; missing language metadata alone does not prove another language |
-| HTTP 403 | The server rejected access; retry the appropriate authenticated workflow or recording recovery |
+| HTTP 403 | Any website or media host can refuse a request. Check that the original page plays. If it requires sign-in, use Browser Assist or import cookies for a supported direct download. Verification, an expired media URL or network restrictions can also cause 403. For a stalled recording, use the offered recovery action. |
 | HTTP 429 | Reduce repeated requests and parallelism, then wait before retrying |
 | Expired URL / HTTP 410 | Reopen Browser Assist and detect a fresh media URL |
 | Playback stops after locking phone | Inspect the stall diagnostics and use recovery; hidden/background playback is site-dependent |
@@ -558,7 +573,7 @@ Filenames on the companion-video page are intended to be clickable. A viewer may
 | PDF link says File not found | Confirm separate file access, or create an embedded PDF and use a viewer supporting attachments |
 | PDF attachment is not visible | Check the viewer's attachment panel or extract/open using a viewer with attachment support |
 
-A validated network or held wake lock does not prove a stream session is accepted. A 403 alone does not prove that the phone locking caused the rejection, and an ended broadcast cannot be recovered by refreshing.
+A validated network or held wake lock does not prove a stream session is accepted. A 403 alone does not prove that credentials are required or that locking the phone caused the rejection, and an ended broadcast cannot be recovered by refreshing.
 
 ## Reporting problems
 

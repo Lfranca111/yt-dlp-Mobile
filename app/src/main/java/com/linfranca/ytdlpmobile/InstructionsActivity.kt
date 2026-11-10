@@ -11,7 +11,7 @@ import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import com.linfranca.ytdlpmobile.databinding.ActivityInstructionsBinding
 
-class InstructionsActivity : AppCompatActivity() {
+class InstructionsActivity : DisplayActivity() {
     private data class Section(val title: String, val body: String)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -25,12 +25,14 @@ class InstructionsActivity : AppCompatActivity() {
                 isAllCaps = false
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
                 textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+                VisualPolish.guideHeading(this)
             }
             val body = TextView(this).apply {
                 text = section.body
                 textSize = 16f
                 setTextIsSelectable(true)
-                setPadding(dp(12), dp(4), dp(12), dp(20))
+                VisualPolish.guideBody(this)
+                setPadding(dp(14), dp(12), dp(14), dp(16))
                 visibility = if (index == 0) View.VISIBLE else View.GONE
             }
             fun label() {
@@ -51,80 +53,120 @@ class InstructionsActivity : AppCompatActivity() {
     private fun dp(value: Int) = (value * resources.displayMetrics.density + 0.5f).toInt()
 
     private fun sections() = listOf(
-        Section("Which button should I use?", """
-            Download — Start here for an ordinary video, audio track, or playlist link.
+        Section("Appearance, themes and orientation", """
+            Open Appearance & display on the Main page. Choose Dark, Light, or Follow device. Website colors inside Browser Assist are controlled by the website.
 
-            Browser-assisted download — Use when the regular download fails but the video plays on its website.
+            Choose Follow Android to use the device rotation setting and rotation suggestion, or lock the app to Portrait or Landscape. Landscape uses a side navigation rail on the three main pages and places browser controls beside the website. All existing controls remain available; scroll within a control panel if it does not fit.
 
-            Browser-assisted stream recording — Save a playing live stream until you choose Stop & save.
+            In wide landscape windows, app menus, dialogs and secondary settings pages open on the right with the existing page on the left. Closing them restores the full page. Browser Assist and recording browsers keep their dedicated layouts. Custom monitoring setup stays unchanged until its browser opens; then the browser is on the left and its settings are on the right.
 
-            Download collection — Swipe to Collections to save supported comics, albums, posts, or search results.
+            The main page navigation stays visible while content scrolls. Secondary screens and browser screens keep their own controls. Theme and orientation changes update the current views in place.
         """.trimIndent()),
-        Section("Regular downloads", """
-            Paste a webpage link, choose a format, and tap Download. MP4 compatibility is a good first choice for common players. Best available quality can produce another container, such as WebM or MKV. MP3 and M4A extract audio. Files go to Downloads/yt-dlp Mobile.
+        Section("App updates and previous APK recovery", """
+            Open Settings / App updates & recovery on Main. Check GitHub for a stable app release, read its notes, download its APK, then tap Install downloaded update. Android asks for installation permission and confirmation. Finish active media tasks first. The startup check can be turned off. Update yt-dlp is a separate engine update.
 
-            Enable Download full playlist only when you want every item. Subtitle languages accept yt-dlp patterns such as en.* or en.*,es. Maximum download speed uses parallel fragments; turn it off if a site has trouble with parallel requests. Extra yt-dlp arguments are optional; app-managed output and cookie options are blocked.
+            Keep previous app APK locally is optional. Choose a folder outside Android/data and accept the storage warning. The app verifies and keeps the installed universal APK plus one older snapshot. APK files remain in that folder after uninstalling; they contain the app, not its settings or cookies. If the app cannot open, use Android Files to open a saved APK directly.
+
+            Try Install previous APK first. Android can block downgrades. The separate Uninstall / reinstall fallback shows a data-loss warning before opening Android's uninstall confirmation. Uninstalling removes app-private settings, cookies, rules, queue records and private media/fragments. Afterwards you must manually open the older saved APK from your backup folder. Public downloaded files remain.
+
+            Export recovery settings before uninstalling when possible. It contains display choices, monitoring rules and source templates, including personal channel URLs. It excludes cookies, sign-ins, queue/history, media, comic update rules, download presets and folder permissions. Import creates disabled rule copies; review, retest sources and sign in before enabling them. Older app versions may not support importing this format and may need manual setup.
         """.trimIndent()),
-        Section("Browser-assisted download", """
-            Open the page, finish any advertisement, sign-in check, or human verification, and play the actual video. Tap Detect and download. This sends the detected media link to the normal download engine; it is separate from live recording.
+        Section("Start here", """
+            Use Download on the main screen for a video, audio track or playlist. Use Browser-assisted download if the site plays the video but Download cannot find or access it. Use Browser-assisted stream recording to save a live broadcast.
 
-            Captured links can expire. If the download fails later, reopen the page and detect again. Some streams are protected or do not provide a downloadable media link.
+            Use the tabs or swipe between the main screen, Collections and Monitoring. Open Queue & history to manage media tasks. Tap a heading in this guide to expand it.
+        """.trimIndent()),
+        Section("Download a video, audio or playlist", """
+            Paste the webpage link and choose a format. MP4 compatibility is a good first choice for common players. Best available quality may save WebM or MKV. MP3 and M4A save audio only. Downloads go to Downloads/yt-dlp Mobile.
+
+            Enable Download full playlist only if you want all items. For one video, paste its own page and leave that option off. If a share link fails, try the full video or post URL.
+
+            Maximum download speed uses parallel fragment requests where supported. Turn it off if a site rejects those requests. Extra yt-dlp arguments are optional; clear them first if the app reports invalid arguments.
+        """.trimIndent()),
+        Section("Subtitles", """
+            Enable subtitles with a video, or choose Subtitles file only to save just the captions. Use the original video page and choose subtitle languages (for example en.* or en.*,es). Enable automatic captions if you want them. A direct media URL may not include captions.
+        """.trimIndent()),
+        Section("Dedicated website handlers", """
+            AniWaves can offer SUB, S-Sub or DUB and a server for the chosen group. h123movies can offer Website default or English audio and a server. Automatic chooses among available options; a specific server can fail. Use the individual episode or movie page for AniWaves, h123movies and WCOStream. If the site needs verification or the intended server does not work, use Browser Assist and select the same playback option there.
+        """.trimIndent()),
+        Section("Download with Browser Assist", """
+            Open Browser-assisted download with the video webpage link. Sign in or complete any verification, let ads finish, and play the intended video for several seconds. Tap Detect and download. If prompted to choose among sources, select the actual video. An audio-only result will not produce a video.
+
+            Tap Zoom out at the top if part of the website or a dialog is cut off. Tap Zoom in to make the page larger, or Reset zoom to return to its original size. These controls resize the page without reloading it.
+
+            Main Download can open Browser Assist on the same page after certain access or detection errors while the main screen is focused. You still need to play and detect the video. If it does not open automatically, use the Browser-assisted download button.
+
+            If a captured link expires, reopen the page and detect again. If only a tiny clip or audio is found, try the original post link with Main Download and cookies if required. DRM-protected streams are unsupported.
+        """.trimIndent()),
+        Section("Sign in and use cookies", """
+            Main Download: import a Netscape-format cookies.txt from your own signed-in browser session using Import cookies.txt. If you need to export one, use a trusted cookie exporter in a compatible browser and transfer the file privately. Keep it private like a password; do not include it in logs or bug reports. Remove it from the app when no longer needed.
+
+            Browser Assist: sign in inside its browser. Importing cookies.txt does not sign you into that browser. If embedded Google sign-in fails, use the site's own sign-in option if it offers one. If a website tries to open its own app, try the full HTTPS link to the video or post. If sign-in is required, you can also try Main Download with cookies from that site.
         """.trimIndent()),
         Section("Record a live stream", """
-            Tap Browser-assisted stream recording. Finish any ad or verification, play the real stream, and tap Find stream & record. The browser session is kept out of the way while the recorder follows the stream. Some sites may still interrupt playback or refuse requests when the phone locks or the network changes.
+            Tap Browser-assisted stream recording, play the intended broadcast and tap Find stream & record. For a long recording, save a short sample first and check picture and sound.
 
-            Tap Stop & save to keep the captured recording, or Cancel recording and discard to remove it. Long recordings can take time to finalize; follow the saving progress. Recordings and their detailed HTTP event logs are saved under Downloads/yt-dlp Mobile/Recordings. A short sample helps check audio before a long recording.
+            Tap Stop & save to keep the recording, or Cancel recording and discard to delete the capture. Saving can take time. Look in Downloads/yt-dlp Mobile/Recordings.
+
+            If a recording stalls and Reopen stalled stream is offered, open it, sign in or verify if needed, play the same broadcast and tap Check playing stream. If recovery fails, use Stop & save and start a fresh recording if needed. An unresolved stall may automatically stop and save what was captured.
+
+            Use Audio sync adjustment only for a steady offset before recording: positive values delay audio; negative values move it earlier. It cannot fix changing delay or edit a saved file.
         """.trimIndent()),
-        Section("Stalls and 403 recovery", """
-            A stall warning appears after about 30 seconds without file or media progress, or 45 seconds if no data ever arrives. The recorder keeps trying automatic stream renewal. If a 403 stall cannot be fixed automatically, Reopen stalled stream becomes available: complete any site check, play the actual stream, then tap Check playing stream. Stop & save is available if the show ended or recovery fails.
+        Section("Queue, retries and partial videos", """
+            Open Queue & history to see progress and manage individual tasks. Simultaneous downloads / recordings controls how many media tasks run at once. The default is one; raise it gradually if needed.
 
-            If a stall remains unresolved for 5 minutes without user interaction, the recorder automatically stops and saves what it captured. Touching the app or recovery browser restarts this 5-minute timer. Successful media progress clears it. The recording status shows the remaining time. If no usable media was captured, there may be no video to save.
+            For a stopped or failed download with retained data, Retry with fresh detection looks for the media again and can reuse matching fragments. Save partial video exports playable material when possible; it may have gaps or missing audio. Recover video from retained fragments attempts local reconstruction. Keep the recovery files until you have checked the saved result.
+
+            Use Remove recovery files when you no longer need those files. To keep the queue and retained media across app updates, install the update over the existing app without clearing app storage.
         """.trimIndent()),
-        Section("Audio and video timing", """
-            The recorder aligns audio and video from stream timing when possible. If the recording has a gap, audio should remain at its matching point in the video; a missing part may be silent or appear as a cut.
+        Section("Monitor new uploads or live channels", """
+            On Monitoring, add a channel, profile or series link. Choose New video uploads or live monitoring, set the check interval and allowed times, and choose what should happen when content is found. Use Check now to verify the link before relying on the schedule. For uploads, the first successful check establishes what the app has already seen.
 
-            Audio sync adjustment on the browser recording screen is for a steady offset. Positive values delay audio (for example +2.00 when speech is two seconds early); negative values move it earlier. It cannot repair constantly jumping timing or change a recording already saved.
+            Use a channel link rather than a share link to one video. For episodic sites use the series or specific season page. If you want an ongoing live stream to stay stopped, pause its rule as well as stopping the recording.
+
+            Allow notifications for alerts and recovery prompts. If checks are late or Android blocks background work, review battery and background settings, then try Check now with the app open. A failed check does not mean a channel is offline.
         """.trimIndent()),
-        Section("Collections", """
-            Swipe to Collections. Paste a complete post, comic, album, gallery, tag, character, category, or search-results link from a recognized site. Check the detected website and page type, then tap Download collection. Search terms are read from the link; results pages may follow their listed posts. The status shows saved, skipped, and failed files.
+        Section("Set up a custom monitoring source", """
+            Use Set up custom monitoring source when the built-in route does not recognize your page. Enter the channel or listing address, open it in the setup browser, and sign in or load more posts if needed. Use Find example posts / videos and select two or more distinct examples from the same list.
 
-            Supported site families include E621, E6AI, E926, Furbooru, Luscious, Multporn, Rule34, Tailspace, and Yiffer. Coverage varies by page type. Enter the credentials shown on the Collections screen when a site requires them. If the site changes its page format or displays verification, it may return no media.
+            Use Test learned rules, reload & review. Confirm the app finds the intended items again before saving the source and selecting it on a monitoring rule.
+
+            For live monitoring, teach the live destination or visible status from the page, then use Test live destination / playback before saving. Use Advanced settings only if the normal setup does not identify the right list or status. Retest after changing a rule or browser mode.
         """.trimIndent()),
-        Section("Comic pages to PDF", """
-            In Collections, open Convert and choose a folder or individual images. Inspect pages in the larger preview, zoom into one if needed, and change their order before tapping Make PDF. Originals are kept.
+        Section("Monitoring sign-in and recovery", """
+            Sign in through the monitoring browser when the rule needs access. Use Browser mode / Saved session settings on built-in rules or the equivalent setting in custom setup. If the mobile page is missing the relevant content, try desktop mode and retest. Use Save login & test session reuse where offered. A page that loads successfully does not always prove you are signed in.
 
-            Add companion video links to PDF lists videos from the destination folder, but some Android PDF viewers cannot open those separate files. Embed companion video files in PDF is off by default. Turn it on to copy the videos into the PDF as attachments; this can greatly increase file size and processing time. In a viewer that supports attachments, tap a filename or paperclip, or open its attachment list.
+            Automatic monitoring reuses saved browser cookies and local storage where available. Imported cookies can help direct requests but do not sign you into the monitoring browser; storage that belongs only to a particular browser tab is not copied. If a supported built-in live check or playback preparation fails, the app may try a bounded browser recovery using the saved session. This does not guarantee website access.
+
+            An agreement, age confirmation, login or verification prompt needs your attention in the monitoring browser. Handle the prompt yourself, then retest the saved session and use Check now. A blocked or inconclusive check keeps the live state unknown and retains the existing baseline. The app does not accept these prompts for you.
+
+            If automatic live detection fails, use Retry live stream in Browser Assist where offered. Play the intended broadcast and tap Find stream & record. For an existing stalled recording, use its recovery control first to avoid starting a second task.
         """.trimIndent()),
-        Section("Cookies and verification", """
-            Import a Netscape-format cookies.txt only when a site requires your signed-in session. Treat it like a password and remove it from the app when no longer needed. Cookies do not guarantee that a website will skip human verification. The app does not support protected DRM streams.
+        Section("Download collections", """
+            Open Collections and paste a supported post, album, comic, gallery or listing URL. Check the detected site and page type, supply credentials if requested, then tap Download collection. Review saved, skipped and failed files in the status or collection log.
 
-            How to get cookies.txt — On your phone, use Firefox for Android: sign in to the website, install a Firefox Android cookie-export add-on such as cookies.txt, open the website, and use the add-on to export a Netscape-format cookies.txt file. Then return to this app, tap Import cookies.txt, and select the saved file. Chrome for Android cannot install cookie-export extensions. For Chrome, sign in to the website on a computer, export its cookies in Netscape format, transfer the file privately to your phone, and import it here. Keep the cookie file private; it can contain your signed-in session.
+            Supported sites include E621, E6AI, E926, Furbooru, Luscious, Multporn, Rule34, Tailspace, Yiffer, nHentai, Doujins, HentaiFox, Hentai2Read, 8Muses, AllPornComic, ILikeComix, MyHentaiGallery, Honeytoon and ComicPorn.xxx. Supported page types vary by site.
 
-            Imported cookies are supplied to yt-dlp downloads. Browser Assist uses a separate WebView session: importing cookies.txt does not sign you into its browser. A site you sign into inside Browser Assist may remember that login the next time you open it.
+            If no files are found, try the specific album or reader page. Check access or verification in a browser. Locked or inaccessible pages may yield no files.
         """.trimIndent()),
-        Section("Common problems", """
-            No media found — Finish ads or verification, play the intended video for several seconds, and detect again.
+        Section("Convert comic pages to PDF", """
+            In Collections, open Convert. Select a folder or individual images, preview and reorder the pages, then tap Make PDF. Your original images are kept.
 
-            White page after Google sign-in in Browser Assist — Some sites offer Continue with Google, but Google sign-in is not supported inside the app's embedded browser. Return to the site and use its email-and-password sign-in instead. This can affect both Browser-assisted download and Browser-assisted stream recording.
-
-            Browser Assist saves only audio or a tiny clip — Some websites, including social media websites like X and Instagram, can expose a separate audio track or a small video fragment instead of the whole video. If the site requires a sign-in, import a Netscape-format cookies.txt from your signed-in browser. Paste the full post or video webpage link on the main screen and tap Download instead of using the detected media URL.
-
-            Post still needs a sign-in or content warning — On some websites you may also need to open the post in Browser Assist, sign in there, and reveal the content if prompted. Then return to the main screen and retry Download with the full webpage link and imported cookies. Browser Assist and yt-dlp have separate sign-in sessions; importing cookies does not sign you into Browser Assist.
-
-            403 / Forbidden — A site rejected the request. Update yt-dlp or try Browser Assist for a download. For a stalled recording, use Reopen stalled stream when offered.
-
-            Expired link or 410 — Open the page again and detect a fresh stream.
-
-            Missing audio — Check a short saved sample. Some sites deliver audio separately or do not expose a usable audio track.
-
-            Collection found no files — Check the detected page type, credentials, and whether the site is showing a verification page.
-
-            PDF video says File not found — Separate video links depend on viewer file access. Make a new PDF with video embedding if you want the videos inside it.
+            Companion video links point to separate files and may not open in every viewer. Enable Embed companion video files in PDF if you want attachments inside the PDF. This increases file size; open the attachment list in a compatible PDF viewer.
         """.trimIndent()),
-        Section("Logs and updates", """
-            Tap Copy diagnostic log on the main screen or Copy collection log on Collections when reporting a problem. Recording runs may also save a detailed HTTP event log in the Recordings folder. Include what you pressed, the status message, and whether the file contains video and audio.
+        Section("Troubleshoot a failed task", """
+            No media, empty response or access denied: check that the original page plays. Try Main Download with your own session cookies or open Browser Assist and play the video before detecting. If Reddit's metadata API is blocked but the video plays in Browser Assist, download from there.
 
-            Update yt-dlp refreshes the download engine. It may help when a website changes, but cannot guarantee support for every stream, account restriction, or protected video.
+            A transfer started but saving failed: read the task's error before trying a different extraction method. Check free space, clear an overly long custom filename template, or use the available recovery action in Queue & history.
+
+            Website changed: Update yt-dlp may help. If the link redirects to an unsupported or unrelated page, open the site and copy the full link to the intended video.
+        """.trimIndent()),
+        Section("Share a useful diagnostic", """
+            For a download, use Copy diagnostic log or the task's log in Queue & history. For Monitoring, use Copy detailed monitoring log or Save detailed monitoring log. For Collections, use Copy collection log. Include what you tried and whether playback, audio or saving failed.
+
+            Monitoring logs include detection, session recovery and recording-start stages, with attempt/rule identifiers, timings and available website or extractor errors. Save the full log after reproducing a problem; the recent-events display contains only part of the retained history.
+
+            If a retained download needs investigation, use Export fragment diagnostics in Queue & history. Export sample fragments includes actual media; review it before sharing. Keep cookies, credentials and private links out of reports.
         """.trimIndent())
     )
 

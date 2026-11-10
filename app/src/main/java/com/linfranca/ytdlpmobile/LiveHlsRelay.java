@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** Fetches completed LL-HLS segments and serves a bounded local HLS window to FFmpeg. */
@@ -39,6 +40,65 @@ final class LiveHlsRelay implements Closeable {
     private long loggedBytes;
     private boolean logLimitReported;
     private volatile boolean closed;
+    private volatile boolean captureEnded;
+    private final boolean classifyStartup;
+    private MouflonPlaylistResolver mouflon;
+    private final Object startupLock = new Object();
+    private Playlist firstVideoPlaylist, firstAudioPlaylist;
+    private Long sharedStartupAnchor;
+    private boolean startupChosen;
+
+    private long initialSequence(Track track, Playlist playlist) throws InterruptedException {
+        synchronized (startupLock) {
+            if (track == video) firstVideoPlaylist = playlist;
+            if (track == audio) firstAudioPlaylist = playlist;
+            startupLock.notifyAll();
+            long deadline = System.currentTimeMillis() + 6000;
+            while (!closed && (firstVideoPlaylist == null || firstAudioPlaylist == null) &&
+                    System.currentTimeMillis() < deadline) startupLock.wait(100);
+            if (firstVideoPlaylist == null || firstAudioPlaylist == null)
+                throw new IllegalStateException("Both live renditions were not available for a shared start");
+            if (!startupChosen) {
+                long[] vt = times(firstVideoPlaylist), at = times(firstAudioPlaylist);
+                int target = Math.max(firstVideoPlaylist.target, firstAudioPlaylist.target);
+                if (vt.length > 0 && at.length > 0) {
+                    try {
+                        sharedStartupAnchor = LiveEdgeStart.sharedAnchor(vt, durations(firstVideoPlaylist),
+                            at, durations(firstAudioPlaylist), target);
+                        event("live startup: shared source-clock anchor epoch_ms=" + sharedStartupAnchor +
+                            "; holdback seconds=" + Math.max(6, target * 3));
+                    } catch (IllegalArgumentException noOverlap) {
+                        long vEnd = vt[vt.length-1] + Math.round(firstVideoPlaylist.entries.get(vt.length-1).duration*1000);
+                        long aEnd = at[at.length-1] + Math.round(firstAudioPlaylist.entries.get(at.length-1).duration*1000);
+                        long gap = Math.max(vt[0], at[0]) - Math.min(vEnd, aEnd);
+                        if (gap > 10000) {
+                            video.unsupported = audio.unsupported = "audio/video source windows do not overlap; more than 10 seconds apart";
+                            throw noOverlap;
+                        }
+                        // A very short initial playlist can precede a delayed audio
+                        // rendition. Keep the existing packet clock rather than
+                        // shifting the audio to the first video frame.
+                        event("live startup: short rendition windows do not yet overlap; gap_ms=" + gap +
+                            "; bounded near-edge startup, packet clock retained; leading audio silence may be needed");
+                    }
+                } else event("live startup: source wall-clock unavailable; each rendition starts near its edge; packet timestamps retained; clock alignment unverified");
+                startupChosen = true;
+            }
+            int index = LiveEdgeStart.index(times(playlist), durations(playlist), sharedStartupAnchor, playlist.target);
+            Entry selected = playlist.entries.get(index);
+            event(track.name + " live startup selected sequence=" + selected.sequence +
+                "; skipped advertised history=" + index + "; total advertised=" + playlist.entries.size() +
+                "; source epoch_ms=" + selected.programTimeMs);
+            return selected.sequence;
+        }
+    }
+    private static long[] times(Playlist p) {
+        if (p.entries.stream().anyMatch(e -> e.programTimeMs == null)) return new long[0];
+        return p.entries.stream().mapToLong(e -> e.programTimeMs).toArray();
+    }
+    private static double[] durations(Playlist p) {
+        return p.entries.stream().mapToDouble(e -> e.duration).toArray();
+    }
 
     static final class Access {
         final String agent, referer, cookie;
@@ -108,20 +168,20 @@ final class LiveHlsRelay implements Closeable {
 
         String filter() {
             if (videoStartMs == null || audioStartMs == null) return null;
-            // Keep the captured packet clock. FFmpeg has already placed both
-            // renditions on one timeline; resetting audio PTS here makes it
-            // start at zero again, even when video starts several seconds in.
-            // Resampling fills missing audio samples without shifting later speech.
+            return filter(Math.max(0, videoStartMs - audioStartMs) / 1000.0, null);
+        }
+
+        String filter(double videoOrigin, Double videoEnd) {
+            if (videoStartMs == null || audioStartMs == null ||
+                !videoClockJumps.isEmpty() || !audioClockJumps.isEmpty() ||
+                videoGaps.stream().anyMatch(g -> g.endMs-g.startMs >= 2000) ||
+                audioGaps.stream().anyMatch(g -> g.endMs-g.startMs >= 2000)) return null;
+            // Capture repairs DTS jumps beyond two seconds. Such a repair can
+            // compress a source-clock hole, so its wall-clock position is not a
+            // verified output position. Keep the original rather than mute the
+            // wrong speech; source gaps remain available in the timing report.
             StringBuilder out = new StringBuilder("aresample=async=1:first_pts=0");
-            long offset = audioStartMs - videoStartMs;
-            if (offset < 0) {
-                // Discard the early audio, retaining the timestamps of every
-                // remaining sample so speech still matches the video clock.
-                out.append(",atrim=start=").append(seconds(-offset / 1000.0));
-            }
-            // Filter timestamps are relative to the earliest track. The video
-            // origin is later only when audio was the first track to start.
-            double videoOrigin = Math.max(0, -offset) / 1000.0;
+            if (videoOrigin > 0) out.append(",atrim=start=").append(seconds(videoOrigin));
             for (TimeGap gap : videoGaps) {
                 double start = videoOrigin + (gap.startMs - videoStartMs) / 1000.0;
                 double end = videoOrigin + (gap.endMs - videoStartMs) / 1000.0;
@@ -130,7 +190,10 @@ final class LiveHlsRelay implements Closeable {
                         .append(',').append(seconds(end)).append(")':volume=0");
                 }
             }
-            out.append(",apad"); // Keep silent audio through the final video frame.
+            if (videoEnd != null && videoEnd > videoOrigin) {
+                out.append(",apad=whole_dur=").append(seconds(videoEnd));
+                out.append(",atrim=end=").append(seconds(videoEnd));
+            } else out.append(",apad");
             return out.toString();
         }
 
@@ -145,10 +208,12 @@ final class LiveHlsRelay implements Closeable {
         final double duration;
         final boolean discontinuity;
         final Long programTimeMs;
-        Entry(long sequence, URI uri, double duration, boolean discontinuity, Long programTimeMs) {
+        final List<URI> parts;
+        Entry(long sequence, URI uri, double duration, boolean discontinuity, Long programTimeMs, List<URI> parts) {
             this.sequence = sequence; this.uri = uri;
             this.duration = duration; this.discontinuity = discontinuity;
             this.programTimeMs = programTimeMs;
+            this.parts = parts;
         }
     }
 
@@ -169,15 +234,25 @@ final class LiveHlsRelay implements Closeable {
         long cachedBytes;
         volatile int target = 2;
         volatile boolean ended;
+        long lastServedSequence = -1;
         volatile int lastStatus;
         volatile String unsupported;
+        volatile LiveHlsStartupFailure startupFailure;
+        void startupIssue(String stage, int status) {
+            if (classifyStartup && goodSegments == 0) startupFailure = new LiveHlsStartupFailure(stage, status);
+        }
+        LiveHlsStartupFailure pendingStartupFailure() {
+            return goodSegments == 0 ? startupFailure : null;
+        }
         int failures;
         volatile long goodSegments;
         volatile long lastPlaylistResponseMs, lastPlaylistSuccessMs;
         volatile long lastSegmentResponseMs, lastSegmentSuccessMs;
         volatile int lastPlaylistHttp = -1, lastSegmentHttp = -1;
         volatile int renewals;
+        String deliverySummary;
         volatile boolean awaitingRenewalSegment;
+        volatile boolean mouflonMappingWaiting;
         Long firstSourceTimeMs, lastSourceEndMs;
         Long firstServedTimeMs;
         final List<TimeGap> sourceGaps = new ArrayList<>();
@@ -197,6 +272,7 @@ final class LiveHlsRelay implements Closeable {
 
         synchronized byte[] segment(long seq) {
             Segment segment = cache.get(seq);
+            if (segment != null) lastServedSequence = Math.max(lastServedSequence, seq);
             if (segment != null && firstServedTimeMs == null) firstServedTimeMs = segment.programTimeMs;
             return segment == null ? null : segment.bytes;
         }
@@ -222,16 +298,36 @@ final class LiveHlsRelay implements Closeable {
         }
 
         void run() {
-            while (!closed) {
+            while (!closed && !captureEnded) {
                 try {
                     Route current = route;
                     Response response = fetch(name, "playlist", current.source, current.access, MAX_PLAYLIST, -1);
                     if (current != route) continue;
                     lastStatus = response.status;
-                    if (response.status != 200 || response.bytes == null) failures++;
+                    if (response.status != 200 || response.bytes == null) {
+                        failures++;
+                        startupIssue("Live playlist", response.status);
+                    }
                     if (response.status == 200 && response.bytes != null) {
                         failures = 0;
-                        Playlist playlist = parse(current.source, new String(response.bytes, StandardCharsets.UTF_8));
+                        String manifestText = new String(response.bytes, StandardCharsets.UTF_8);
+                        String summary = StreamDeliveryDiagnostics.describe(current.source.toString(), manifestText);
+                        if (!summary.equals(deliverySummary)) {
+                            deliverySummary = summary;
+                            event(name + " " + summary);
+                        }
+                        if (mouflon != null) {
+                            try { manifestText = mouflon.rewrite(current.source, manifestText); }
+                            catch (MouflonPlaylistResolver.Pending pending) {
+                                mouflonMappingWaiting = true;
+                                event(name + " mouflon recovery waiting for fresh browser mapping; placeholder not fetched");
+                                failures++;
+                                synchronized (this) { wait(1000); }
+                                continue;
+                            }
+                            mouflonMappingWaiting = false;
+                        }
+                        Playlist playlist = parse(current.source, manifestText);
                         if (renewals > 0 && next >= 0 && !playlist.entries.isEmpty() &&
                             playlist.entries.get(playlist.entries.size() - 1).sequence + 30 < next) {
                             unsupported = "renewed playlist reset segment sequence";
@@ -243,7 +339,8 @@ final class LiveHlsRelay implements Closeable {
                             break;
                         }
                         if (playlist.entries.isEmpty()) {
-                            unsupported = "no media segments";
+                            if (classifyStartup && goodSegments == 0) startupIssue("Live playlist", 200);
+                            else unsupported = "no media segments";
                             break;
                         }
                         target = playlist.target;
@@ -261,26 +358,45 @@ final class LiveHlsRelay implements Closeable {
                                     initUri = playlist.init; initBytes = init.bytes;
                                     if (renewals == 0) { cache.clear(); cachedBytes = 0; next = -1; }
                                 }
-                            }
+                            } else startupIssue("HLS initialization segment", init.status);
                         }
                         if (unsupported != null) break;
                         if (playlist.init == null || playlist.init.equals(initUri)) {
                             if (next < 0 && !playlist.entries.isEmpty()) {
-                                // Both renditions may have different segment lengths.
-                                // Start at each playlist's earliest still-advertised
-                                // segment so their initial media time overlaps.
-                                next = playlist.entries.get(0).sequence;
+                                next = initialSequence(this, playlist);
                             }
                             for (Entry entry : playlist.entries) {
                                 if (current != route) break;
-                                if (closed || entry.sequence < next) continue;
+                                if (closed || captureEnded) break;
+                                if (entry.sequence < next) continue;
                                 if (entry.sequence > next) {
                                     event(name + " missing sequences " + next + ".." + (entry.sequence - 1));
                                     next = entry.sequence;
                                 }
                                 Response part = fetch(name, "segment", entry.uri, current.access, MAX_SEGMENT, entry.sequence);
                                 if (current != route) break;
+                                // Assemble only a completed segment with every advertised part.
+                                // Authorization failures never trigger this fallback.
+                                if ((part.status == 404 || part.status == 410) && !entry.parts.isEmpty()) {
+                                    ByteArrayOutputStream joined = new ByteArrayOutputStream();
+                                    boolean complete = true;
+                                    for (URI uri : entry.parts) {
+                                        if (closed || current != route) { complete = false; break; }
+                                        Response piece = fetch(name, "segment", uri, current.access,
+                                            MAX_SEGMENT, entry.sequence);
+                                        if (piece.status != 200 || piece.bytes == null ||
+                                            joined.size() + piece.bytes.length > MAX_SEGMENT) {
+                                            complete = false; break;
+                                        }
+                                        joined.write(piece.bytes);
+                                    }
+                                    event(name + " completed segment parts fallback seq=" + entry.sequence +
+                                        " parts=" + entry.parts.size() + " accepted=" + complete);
+                                    if (complete) part = new Response(200, joined.toByteArray());
+                                }
+                                if (current != route) break;
                                 if (part.status != 200 || part.bytes == null) {
+                                    startupIssue("HLS media segment", part.status);
                                     failures++;
                                     break;
                                 }
@@ -324,7 +440,7 @@ final class LiveHlsRelay implements Closeable {
                                 next > playlist.entries.get(playlist.entries.size() - 1).sequence);
                         }
                     }
-                    if (ended) break;
+                    if (ended) { event(name + " completion confirmed: source ENDLIST and every final segment fetched; draining local playlist");break; }
                     long interval = NativeMedia.retry(target, failures, false);
                     synchronized (this) { wait(interval); }
                 } catch (UnsupportedOperationException unsupportedPlaylist) {
@@ -336,6 +452,7 @@ final class LiveHlsRelay implements Closeable {
                     event(name + " playlist parse/network failure (" +
                         failure.getClass().getSimpleName() + "); retrying");
                     failures++;
+                    if (startupFailure == null) startupIssue("Live playlist", -1);
                     try { synchronized (this) { wait(NativeMedia.retry(target, failures, true)); } } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt(); break;
                     }
@@ -352,14 +469,45 @@ final class LiveHlsRelay implements Closeable {
 
     LiveHlsRelay(String videoUrl, String audioUrl, Access videoAccess, Access audioAccess,
                  File diagnosticFile) throws Exception {
+        this(videoUrl, audioUrl, videoAccess, audioAccess, diagnosticFile, false);
+    }
+
+    LiveHlsRelay(String url, Access access, File diagnosticFile) throws Exception {
+        this(url, url, access, access, diagnosticFile, true);
+    }
+
+    LiveHlsRelay(String url, Access access, File diagnosticFile, MouflonPlaylistResolver resolver) throws Exception {
+        this(url, url, access, access, diagnosticFile, true, resolver);
+    }
+
+    private LiveHlsRelay(String videoUrl, String audioUrl, Access videoAccess, Access audioAccess,
+                 File diagnosticFile, boolean combined) throws Exception {
+        this(videoUrl, audioUrl, videoAccess, audioAccess, diagnosticFile, combined, null);
+    }
+
+    private LiveHlsRelay(String videoUrl, String audioUrl, Access videoAccess, Access audioAccess,
+                 File diagnosticFile, boolean combined, MouflonPlaylistResolver resolver) throws Exception {
+        this(videoUrl, audioUrl, videoAccess, audioAccess, diagnosticFile, combined, resolver, false);
+    }
+
+    LiveHlsRelay(String videoUrl, String audioUrl, Access videoAccess, Access audioAccess,
+                 File diagnosticFile, boolean combined, boolean classifyStartup) throws Exception {
+        this(videoUrl, audioUrl, videoAccess, audioAccess, diagnosticFile, combined, null, classifyStartup);
+    }
+
+    private LiveHlsRelay(String videoUrl, String audioUrl, Access videoAccess, Access audioAccess,
+                 File diagnosticFile, boolean combined, MouflonPlaylistResolver resolver, boolean classifyStartup) throws Exception {
+        this.classifyStartup = classifyStartup;
+        mouflon = resolver;
         video = new Track("video", videoUrl, videoAccess);
-        audio = new Track("audio", audioUrl, audioAccess);
+        audio = combined ? video : new Track("audio", audioUrl, audioAccess);
         fullLog = new BufferedWriter(new OutputStreamWriter(
             new FileOutputStream(diagnosticFile), StandardCharsets.UTF_8));
         server = new ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"));
         start("live-hls-server", this::serve);
         start("live-hls-video", video::run);
-        start("live-hls-audio", audio::run);
+        if (audio != video) start("live-hls-audio", audio::run);
+        else event("combined HLS relay: one fetcher for both source tracks");
         long deadline = System.currentTimeMillis() + 12_000;
         long firstReady = -1;
         while (!closed && System.currentTimeMillis() < deadline) {
@@ -368,22 +516,50 @@ final class LiveHlsRelay implements Closeable {
                 if ((video.bufferedSegments() >= 2 && audio.bufferedSegments() >= 2) ||
                     System.currentTimeMillis() - firstReady >= 1500) return;
             }
-            if (video.lastStatus == 403 || audio.lastStatus == 403 ||
-                video.unsupported != null || audio.unsupported != null) break;
+            if ((!classifyStartup && (video.lastStatus == 403 || audio.lastStatus == 403)) ||
+                video.unsupported != null || audio.unsupported != null ||
+                routeRejected(video.pendingStartupFailure()) || routeRejected(audio.pendingStartupFailure())) break;
             Thread.sleep(100);
         }
         String failure = "Live stream could not start: video HTTP " + video.lastStatus +
             ", audio HTTP " + audio.lastStatus + "; " +
             (video.unsupported != null ? video.unsupported :
                 audio.unsupported != null ? audio.unsupported : "no usable segments") + ".";
+        LiveHlsStartupFailure startup = video.pendingStartupFailure();
+        LiveHlsStartupFailure other = audio.pendingStartupFailure();
+        if (routeRejected(other) || startup == null) startup = other;
+        if (classifyStartup) {
+            String terminal = video.unsupported != null ? video.unsupported : audio.unsupported;
+            if (terminal != null) startup = new LiveHlsStartupFailure("Live HLS startup refused: " + terminal);
+            if (startup == null) startup = new LiveHlsStartupFailure("Initial HLS media", -1);
+            event("startup failure: " + startup.getMessage());
+            close();
+            throw startup;
+        }
         close();
         throw new IllegalStateException(failure);
     }
 
+    private static boolean routeRejected(LiveHlsStartupFailure failure) {
+        return failure != null && failure.rejectRouteNow();
+    }
+
+    boolean sourceEnded() { return video.ended && audio.ended; }
+    boolean finalSegmentsServed() {
+        synchronized (video) { synchronized (audio) {
+            return sourceEnded() && video.lastServedSequence >= video.next-1 && audio.lastServedSequence >= audio.next-1;
+        } }
+    }
+
     String videoUrl() { return "http://127.0.0.1:" + server.getLocalPort() + "/" + token + "/video.m3u8"; }
-    String audioUrl() { return "http://127.0.0.1:" + server.getLocalPort() + "/" + token + "/audio.m3u8"; }
+    boolean waitingForMouflonMapping() { return mouflon != null && video.mouflonMappingWaiting; }
+    String audioUrl() { if (audio == video) return videoUrl(); return "http://127.0.0.1:" + server.getLocalPort() + "/" + token + "/audio.m3u8"; }
 
     boolean renew(String kind, String url, Access access) {
+        return renew(kind, url, access, false);
+    }
+
+    boolean renew(String kind, String url, Access access, boolean forceVerifiedRetry) {
         Track track = "video".equals(kind) ? video : "audio".equals(kind) ? audio : null;
         if (closed || track == null || access == null) {
             event("renewal rejected: recorder stopped or track missing");
@@ -402,13 +578,12 @@ final class LiveHlsRelay implements Closeable {
             URI previous = track.route.source;
             // A credential change for the same rendition is safe to try. Never
             // substitute an ad, another video, or a different quality variant.
-            if (!previous.getScheme().equalsIgnoreCase(fresh.getScheme()) ||
-                !previous.getRawPath().equals(fresh.getRawPath())) {
+            if (!RecordingRenewalTarget.sameRoute(previous.toString(), fresh.toString())) {
                 event(kind + " renewal rejected: different rendition or scheme");
                 return false;
             }
             Access old = track.route.access;
-            if (previous.equals(fresh) && old.cookie.equals(access.cookie) &&
+            if (!forceVerifiedRetry && previous.equals(fresh) && old.cookie.equals(access.cookie) &&
                 old.referer.equals(access.referer) && old.agent.equals(access.agent) &&
                 old.extra.equals(access.extra)) {
                 event(kind + " renewal skipped: current credentials unchanged");
@@ -422,6 +597,13 @@ final class LiveHlsRelay implements Closeable {
         }
         event(kind + " renewal route updated; waiting for refreshed media segment");
         return true;
+    }
+
+    void stopFetching() {
+        captureEnded = true;
+        synchronized (video) { video.notifyAll(); }
+        if (audio != video) synchronized (audio) { audio.notifyAll(); }
+        event("capture ended: playlist and segment polling stopped; finalization uses saved media only");
     }
 
     void logDiagnosticEvent(String safeEvent) { event("app " + safeEvent); }
@@ -461,23 +643,28 @@ final class LiveHlsRelay implements Closeable {
     }
 
     private Response fetch(String track, String kind, URI uri, Access access, int limit, long seq) {
+        if (mouflon != null) access = mouflon.accessFor(uri, access);
         HttpURLConnection connection = null;
         int status = -1;
         byte[] data = null;
         long begun = System.currentTimeMillis();
         event(track + " " + kind + (seq >= 0 ? " seq=" + seq : "") + " request started");
+        if (mouflon != null) event("mouflon_request_context; track=" + track + "; kind=" + kind +
+            "; header names=" + access.extra.keySet() + "; cookies present=" + !access.cookie.isEmpty());
         try {
             URL url = uri.toURL();
             connection = (HttpURLConnection) url.openConnection();
             connection.setConnectTimeout(5000);
             connection.setReadTimeout(8000);
+            if (mouflon != null) connection.setInstanceFollowRedirects(false);
             if (!access.agent.isEmpty()) connection.setRequestProperty("User-Agent", access.agent);
             if (!access.referer.isEmpty()) connection.setRequestProperty("Referer", access.referer);
             if (!access.cookie.isEmpty()) connection.setRequestProperty("Cookie", access.cookie);
             for (Map.Entry<String, String> header : access.extra.entrySet()) {
                 String key = header.getKey();
                 if (!key.equalsIgnoreCase("cookie") && !key.equalsIgnoreCase("referer") &&
-                    !key.equalsIgnoreCase("user-agent") && !key.equalsIgnoreCase("host")) {
+                    !key.equalsIgnoreCase("user-agent") && !key.equalsIgnoreCase("host") &&
+                    (mouflon == null || !key.equalsIgnoreCase("range"))) {
                     connection.setRequestProperty(key, header.getValue());
                 }
             }
@@ -492,6 +679,19 @@ final class LiveHlsRelay implements Closeable {
                         output.write(buffer, 0, size);
                     }
                     data = output.toByteArray();
+                    Track receiving = "video".equals(track) ? video : audio;
+                    if (classifyStartup && receiving.goodSegments == 0 &&
+                        (data.length == 0 || (!"playlist".equals(kind) && !hasMediaHeader(data)))) {
+                        event(track + " " + kind + " startup body rejected; missing supported media signature or empty response");
+                        data = null;
+                    }
+                    if (mouflon != null && !"playlist".equals(kind)) {
+                        String box = data.length < 8 ? "" : new String(data,4,4,StandardCharsets.US_ASCII);
+                        if (!Set.of("ftyp","styp","sidx","moof").contains(box)) {
+                            event("mouflon_response_rejected; non-MP4 body; track=" + track + "; kind=" + kind);
+                            data = null; status = -1;
+                        } else event("mouflon_media_response_verified; ISO BMFF header accepted; track=" + track + "; kind=" + kind);
+                    }
                 }
             }
         } catch (Exception failure) {
@@ -504,6 +704,7 @@ final class LiveHlsRelay implements Closeable {
         event(track + " " + kind + (seq >= 0 ? " seq=" + seq : "") + " HTTP=" + status +
             " bytes=" + (data == null ? 0 : data.length) +
             " elapsed=" + (System.currentTimeMillis() - begun) + "ms");
+        if (mouflon != null && "segment".equals(kind)) mouflon.mediaResponse(uri,status,data!=null);
         Track observed = "video".equals(track) ? video : "audio".equals(track) ? audio : null;
         if (observed != null) {
             long now = System.currentTimeMillis();
@@ -518,6 +719,30 @@ final class LiveHlsRelay implements Closeable {
             }
         }
         return new Response(status, data);
+    }
+
+    /** Recognize the transport/container signatures used by verified YouTube HLS. */
+    private static boolean hasMediaHeader(byte[] data) {
+        int offset = 0;
+        if (data.length >= 10 && data[0] == 'I' && data[1] == 'D' && data[2] == '3') {
+            int size = 0;
+            for (int i = 6; i < 10; i++) {
+                if (data[i] < 0) return false;
+                size = (size << 7) | data[i];
+            }
+            offset = 10 + size + ((data[5] & 0x10) == 0 ? 0 : 10);
+        }
+        if (data.length - offset >= 188 && data[offset] == 0x47 &&
+            (data.length - offset == 188 || data[offset + 188] == 0x47)) return true;
+        if (data.length - offset >= 7 && (data[offset] & 0xff) == 0xff &&
+            (data[offset + 1] & 0xf6) == 0xf0) return true; // ADTS
+        if (data.length - offset < 8) return false;
+        String type = new String(data, offset + 4, 4, StandardCharsets.US_ASCII);
+        long size = ((data[offset] & 255L) << 24) | ((data[offset + 1] & 255L) << 16) |
+            ((data[offset + 2] & 255L) << 8) | (data[offset + 3] & 255L);
+        return (size == 0 || (size == 1 && data.length - offset >= 16) ||
+            (size >= 8 && size <= data.length - offset)) &&
+            Set.of("ftyp","styp","sidx","moof","mdat","emsg","prft","free").contains(type);
     }
 
     private static long parseLong(String text) {
@@ -535,7 +760,11 @@ final class LiveHlsRelay implements Closeable {
 
     private static Playlist parse(URI base, String text) {
         if (!text.startsWith("#EXTM3U")) throw new IllegalArgumentException("Not an HLS media playlist");
+        if (text.contains("#EXT-X-MOUFLON:"))
+            throw new UnsupportedOperationException("custom MOUFLON playlist requires site extractor; placeholder URLs not followed");
         Playlist result = new Playlist();
+        List<URI> parts = new ArrayList<>();
+        double partDuration = 0;
         long sequence = 0;
         double duration = -1;
         boolean discontinuity = false;
@@ -544,11 +773,18 @@ final class LiveHlsRelay implements Closeable {
             if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) sequence = parseLong(line.substring(22).trim());
             else if (line.startsWith("#EXT-X-TARGETDURATION:")) result.target =
                 Math.max(1, Math.min(15, parseInt(line.substring(22).trim())));
-            else if (line.startsWith("#EXT-X-BYTERANGE") ||
-                line.startsWith("#EXT-X-PART:")) {
-                if (line.startsWith("#EXT-X-BYTERANGE"))
-                    throw new UnsupportedOperationException("byte range playlist");
-                // Partial segments are intentionally ignored; only EXTINF is complete.
+            else if (line.startsWith("#EXT-X-BYTERANGE")) {
+                throw new UnsupportedOperationException("byte range playlist");
+            } else if (line.startsWith("#EXT-X-PART:")) {
+                if (line.contains("BYTERANGE=") || line.contains("GAP=YES")) {
+                    parts.clear(); partDuration = -1000;
+                } else {
+                    String path = attribute(line, "URI");
+                    java.util.regex.Matcher length = java.util.regex.Pattern.compile("(?:^|[:,])DURATION=([0-9.]+)").matcher(line);
+                    if (path != null && length.find() && parts.size() < 64) {
+                        parts.add(base.resolve(path)); partDuration += Double.parseDouble(length.group(1));
+                    } else { parts.clear(); partDuration = -1000; }
+                }
             } else if (line.startsWith("#EXT-X-KEY:") &&
                 !line.toUpperCase(java.util.Locale.ROOT).contains("METHOD=NONE")) {
                 throw new UnsupportedOperationException("encrypted playlist");
@@ -560,14 +796,17 @@ final class LiveHlsRelay implements Closeable {
                 discontinuity = true;
                 programTimeMs = null;
             } else if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME:")) {
-                programTimeMs = OffsetDateTime.parse(line.substring(25).trim()).toInstant().toEpochMilli();
+                String stamp = line.substring(25).trim().replaceFirst("([+-]\\d{2})(\\d{2})$", "$1:$2");
+                programTimeMs = OffsetDateTime.parse(stamp).toInstant().toEpochMilli();
             }
             else if (line.equals("#EXT-X-ENDLIST")) result.ended = true;
             else if (line.startsWith("#EXTINF:")) duration = Double.parseDouble(line.substring(8, line.indexOf(',', 8) < 0 ? line.length() : line.indexOf(',', 8)));
             else if (!line.isEmpty() && !line.startsWith("#") && duration >= 0) {
                 result.entries.add(new Entry(sequence++, base.resolve(line), duration,
-                    discontinuity, programTimeMs));
+                    discontinuity, programTimeMs,
+                    Math.abs(partDuration - duration) <= 0.025 ? new ArrayList<>(parts) : List.of()));
                 if (programTimeMs != null) programTimeMs += Math.round(duration * 1000);
+                parts.clear(); partDuration = 0;
                 duration = -1; discontinuity = false;
             }
         }
@@ -592,7 +831,7 @@ final class LiveHlsRelay implements Closeable {
 
     // A resource entry captured from a player may contain a fixed LL-HLS
     // delivery directive. Reusing that old media sequence stalls live reloads.
-    private static URI cleanPlaylistUrl(String url) {
+    static URI cleanPlaylistUrl(String url) {
         int question = url.indexOf('?');
         if (question < 0) return URI.create(url);
         StringBuilder result = new StringBuilder(url.substring(0, question));

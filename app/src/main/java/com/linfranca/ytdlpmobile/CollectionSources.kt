@@ -18,7 +18,7 @@ internal data class CollectionCredentials(
 )
 
 internal data class CollectionItem(val id: String, val url: String, val extension: String,
-    val order: Int = 0, val folder: String = "", val fallbackUrl: String = "")
+    val order: Int = 0, val folder: String = "", val fallbackUrl: String = "", val referer: String = "")
 
 internal data class CollectionRoute(val site: String, val title: String, val uri: URI, val parts: List<String>, val query: Map<String, String>) {
     companion object {
@@ -36,16 +36,20 @@ internal data class CollectionRoute(val site: String, val title: String, val uri
                 "E621", "E6AI", "E926" -> query["tags"] ?: parts.getOrNull(1) ?: ""
                 "Furbooru" -> query["q"] ?: parts.getOrNull(1) ?: ""
                 "Rule34" -> query["tags"] ?: query["id"] ?: ""
-                "Luscious" -> (if (parts.firstOrNull() == "pictures") parts.getOrNull(2)
+                "Luscious" -> if (parts.getOrNull(1) == "list") "filtered-albums" else (if (parts.firstOrNull() == "pictures") parts.getOrNull(2)
                     else parts.getOrNull(1)).orEmpty()
                 "Yiffer" -> if (parts.firstOrNull() == "comics") parts.getOrNull(1).orEmpty() else parts.firstOrNull().orEmpty()
-                "Tailspace" -> if (parts.firstOrNull() == "c")
+                "Tailspace" -> if (parts.firstOrNull() == "browse") "browse-${query["tag"] ?: "comics"}" else if (parts.firstOrNull() == "c")
                     java.net.URLDecoder.decode(parts.getOrNull(1).orEmpty(), "UTF-8")
                     else "${parts.getOrNull(1).orEmpty()}-${parts.getOrNull(3).orEmpty()}"
-                else -> parts.getOrNull(1).orEmpty()
+                else -> if (CollectionSiteProfile.site(uri.host.orEmpty()) != null)
+                    query["q"] ?: query["query"] ?: query["s"] ?: parts.takeLast(2).joinToString("-").ifBlank { "filtered-collections" }
+                    else parts.getOrNull(1).orEmpty()
             }
             if (title.isBlank() || match.pageType == "Site page")
                 throw IllegalArgumentException("Paste a search, post, comic, gallery, or album link rather than the site home page.")
+            if (match.pageType in setOf("Account page", "Non-collection page"))
+                throw IllegalArgumentException(match.hint)
             if (match.site == "Multporn" && match.pageType == "Video page")
                 throw IllegalArgumentException("This site's video pages are not available through its comic image list.")
             return CollectionRoute(match.site, title, uri, parts, query)
@@ -72,7 +76,7 @@ internal class CollectionSources(
     private val sourceTagPattern = Regex("""<source\b[^>]*>""", RegexOption.IGNORE_CASE)
     private val anchorTagPattern = Regex("""<a\b[^>]*>""", RegexOption.IGNORE_CASE)
     private val imageTagPattern = Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE)
-    private val userAgent = "yt-dlp Mobile/0.6.20 (Android; collection downloader)"
+    private val userAgent = "yt-dlp Mobile/1.0.14 (Android; collection downloader)"
 
     fun discover(route: CollectionRoute) {
         when (route.site) {
@@ -83,7 +87,9 @@ internal class CollectionSources(
             "Yiffer" -> yiffer(route)
             "Tailspace" -> tailspace(route)
             "Luscious" -> luscious(route)
-            else -> error("Unsupported collection source.")
+            else -> if (CollectionSiteProfile.sites.containsValue(route.site))
+                CollectionWebExtractor(cancelled, { url -> get(url) }, onEvent, onBatch).discover(route)
+                else error("Unsupported collection source.")
         }
     }
 
@@ -217,7 +223,7 @@ internal class CollectionSources(
     }
 
     private fun multporn(route: CollectionRoute) {
-        if (route.parts.firstOrNull() in setOf("category", "characters", "category_hentai", "characters_hentai")) {
+        if (route.parts.firstOrNull() in setOf("category", "characters", "category_hentai", "characters_hentai", "authors_hentai_comics", "manga")) {
             multpornListing(route)
             return
         }
@@ -257,7 +263,9 @@ internal class CollectionSources(
         var emptyPages = 0
         while (listingPage < 500 && !cancelled()) {
             val pageUrl = if (listingPage == 0) route.uri.toString() else
-                "${route.uri.scheme}://${route.uri.host}${route.uri.path}?page=0,$listingPage"
+                "${route.uri.scheme}://${route.uri.host}${route.uri.rawPath}?" +
+                    route.uri.rawQuery.orEmpty().split('&').filter { it.isNotBlank() && it.substringBefore('=') != "page" }
+                        .plus("page=0,$listingPage").joinToString("&")
             val html = get(pageUrl)
             val links = anchorLinks(html, pageUrl)
                 .filter { link ->
@@ -290,7 +298,42 @@ internal class CollectionSources(
         if (listingPage == 500) onEvent("Listing reached the 500-page safety limit.")
     }
 
+    private fun listing(route: CollectionRoute, accept: (URI) -> Boolean,
+                        load: (CollectionSources, CollectionRoute) -> Unit) {
+        val seenPages = HashSet<String>()
+        val seenChildren = HashSet<String>()
+        var current: String? = route.uri.toString()
+        var count = 0
+        while (current != null && !cancelled()) {
+            if (seenPages.size >= 500) throw IllegalStateException("Listing reached the 500-page limit; narrow the filters.")
+            val url = current
+            if (!seenPages.add(url)) break
+            val doc = org.jsoup.Jsoup.parse(get(url), url)
+            val children = doc.select("a[href]").map { it.absUrl("href").substringBefore('#') }
+                .filter { raw -> runCatching { val u = URI(raw); NativeMedia.site(u.host.orEmpty()) == NativeMedia.site(route.uri.host.orEmpty()) && accept(u) }.getOrDefault(false) }
+                .distinct().filter { seenChildren.add(it.substringBefore('?')) }
+            onEvent("Listing page ${seenPages.size}: ${children.size} new collections.")
+            for (link in children) {
+                if (cancelled()) return
+                val child = CollectionRoute.from(link)
+                count++
+                val nested = CollectionSources(credentials, cancelled, onConnection, onEvent) { _, items ->
+                    onBatch(count, items.map { it.copy(folder = child.title) })
+                }
+                try { load(nested, child) }
+                catch (error: InterruptedException) { throw error }
+                catch (error: Exception) { onEvent("Collection $count failed: ${error.message}") }
+            }
+            current = CollectionWebExtractor.nextPage(doc, URI(url))
+        }
+        if (seenChildren.isEmpty()) throw IllegalStateException("No collection links were exposed. The page may need browser sign-in or the site changed its layout.")
+    }
+
     private fun tailspace(route: CollectionRoute) {
+        if (route.parts.firstOrNull() == "browse") {
+            listing(route, { uri -> uri.path.orEmpty().startsWith("/c/") }) { nested, child -> nested.tailspace(child) }
+            return
+        }
         val page = get(route.uri.toString())
         if (route.parts.firstOrNull() == "artist") {
             val images = imageTags(page).mapNotNull { tag ->
@@ -351,6 +394,10 @@ internal class CollectionSources(
     }
 
     private fun luscious(route: CollectionRoute) {
+        if (route.parts.getOrNull(1) == "list") {
+            listing(route, { uri -> Regex("^/albums/[^/]+_\\d+/?$").matches(uri.path.orEmpty()) }) { nested, child -> nested.luscious(child) }
+            return
+        }
         val albumPart = if (route.parts.firstOrNull() == "pictures") route.parts.getOrNull(2)
             else route.parts.getOrNull(1)
         val albumId = albumPart?.substringAfterLast('_')?.takeIf { it.all(Char::isDigit) }
@@ -584,6 +631,9 @@ internal class CollectionSources(
             connection.readTimeout = 30_000
             connection.setRequestProperty("User-Agent", userAgent)
             connection.setRequestProperty("Accept", "application/json, application/xml, text/html, */*")
+            android.webkit.CookieManager.getInstance().getCookie(url)?.takeIf(String::isNotBlank)?.let {
+                connection.setRequestProperty("Cookie", it)
+            }
             headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
             if (body != null) {
                 connection.requestMethod = "POST"
@@ -592,6 +642,7 @@ internal class CollectionSources(
                 connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             }
             val code = connection.responseCode
+            onEvent("Collection request: host=${URL(url).host}, HTTP=$code, type=${connection.contentType?.substringBefore(';') ?: "unknown"}, redirected=${connection.url.toString() != url}.")
             if (code !in 200..299) {
                 throw HttpResponseError(code, connection.getHeaderField("Retry-After")?.toIntOrNull() ?: 0)
             }

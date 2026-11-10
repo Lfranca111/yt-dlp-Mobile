@@ -11,8 +11,8 @@ android {
         applicationId = "com.linfranca.ytdlpmobile"
         minSdk = 29
         targetSdk = 35
-        versionCode = 56
-        versionName = "1.0.0"
+        versionCode = 133
+        versionName = "1.0.74"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -78,9 +78,29 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("androidx.webkit:webkit:1.15.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
 
     implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
 
+    implementation("org.jsoup:jsoup:1.18.3")
+
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+}
+
+// AGP's Android javac system image does not expose jdk.httpserver. Supply
+// the host JDK's API to test compilation only; the test JVM uses its own module.
+val httpServerModule = file("${System.getProperty("java.home")}/jmods/jdk.httpserver.jmod")
+val httpServerTestApi by tasks.registering(Jar::class) {
+    archiveFileName.set("jdk-httpserver-test-api.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("test-support"))
+    from(zipTree(httpServerModule)) {
+        include("classes/com/sun/net/httpserver/**")
+        eachFile { path = path.removePrefix("classes/") }
+        includeEmptyDirs = false
+    }
+}
+dependencies {
+    testCompileOnly(files(httpServerTestApi.flatMap { it.archiveFile }).builtBy(httpServerTestApi))
 }

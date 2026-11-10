@@ -13,7 +13,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.webkit.CookieManager
-import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import android.webkit.WebResourceRequest
@@ -39,10 +38,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class BrowserSessionActivity : AppCompatActivity() {
+class BrowserSessionActivity : DisplayActivity() {
+    private var downloadDiscovery: BrowserDownloadDiscovery?=null
+
     private lateinit var binding: ActivityBrowserSessionBinding
     private val mediaCandidates = ConcurrentHashMap<String, MediaCandidate>()
     private lateinit var pageUrl: String
+    private val mediaState get() = recoveryTaskId.takeIf { it.isNotBlank() }?.let {
+        MediaTaskRuntime.manualState(it) ?: MediaTaskState()
+    } ?: MediaTaskRuntime.state(captureLease,pageUrl,false)
+    private var recoveryTaskId = ""
     private lateinit var mode: String
     private val pollHandler = Handler(Looper.getMainLooper())
     private var captureActive = false
@@ -59,22 +64,35 @@ class BrowserSessionActivity : AppCompatActivity() {
     private var renewalAudioUrl = ""
     private val lastRenewalOffer = mutableMapOf<String, String>()
     private var waitingForActualStream = false
+    private var recoveryGeneration = 0
+    private val verifiedRecoveryTracks = mutableSetOf<String>()
+    private val renewalChecks = mutableSetOf<String>()
+    private val deliveryObservations = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private var streamDiagnostics = "No playlist body inspected; delivery unknown."
+    @Volatile private var pageRequestUrl = ""
+    @Volatile private var pageRequestHeaders: Map<String, String> = emptyMap()
+    private var pageLoadObservation = "no completed page load observed"
+    private var mainPageHttpError: Int? = null
     private var lastPageReloadAt = 0L
     private val renewalPoll = object : Runnable {
         override fun run() {
             if (!nativeRecordingActive || isFinishing || isDestroyed) return
+            syncRecorderRenditions()
             recordBrowserEvent("browser_renewal_poll")
             if (waitingForActualStream) {
                 checkPlayerAfterReload()
             } else {
-                offerRenewal("video", renewalVideoUrl)
-                offerRenewal("audio", renewalAudioUrl)
+                offerRenewal("video")
+                offerRenewal("audio")
             }
             pollHandler.postDelayed(this, 20_000L)
         }
     }
     private val refreshReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            val incoming=intent?.getStringExtra(TransferQueue.JOB).orEmpty()
+            if(incoming.isNotBlank() && incoming!=captureLease && incoming!=MediaTaskRuntime.idForPage(pageUrl,false)) return
+
             if (intent?.action != RecordingService.ACTION_BROWSER_REFRESH_REQUEST || !nativeRecordingActive) return
             recordBrowserEvent("browser_refresh_request_received")
             if (binding.streamRecoveryControls.visibility == View.VISIBLE && hasWindowFocus()) {
@@ -87,14 +105,16 @@ class BrowserSessionActivity : AppCompatActivity() {
                 return
             }
             lastPageReloadAt = now
-            waitingForActualStream = true
-            mediaCandidates.clear()
+            beginFreshRecovery("automatic")
             recordBrowserEvent("browser_page_reload_attempt")
             binding.webView.reload()
         }
     }
     private val stopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            val incoming=intent?.getStringExtra(TransferQueue.JOB).orEmpty()
+            if(incoming.isNotBlank() && incoming!=captureLease && incoming!=MediaTaskRuntime.idForPage(pageUrl,false)) return
+
             when (intent?.action) {
                 RecordingService.ACTION_BROWSER_STOP_REQUEST -> stopBrowserRecording()
                 RecordingService.ACTION_BROWSER_FINALIZING -> if (nativeRecordingActive) {
@@ -109,6 +129,9 @@ class BrowserSessionActivity : AppCompatActivity() {
     }
     private val recordingStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            val incoming=intent?.getStringExtra(TransferQueue.JOB).orEmpty()
+            if(incoming.isNotBlank() && incoming!=captureLease && incoming!=MediaTaskRuntime.idForPage(pageUrl,false)) return
+
             val update = intent ?: return
             if (!nativeRecordingActive || update.action != DownloadService.ACTION_STATE) return
             if (update.getBooleanExtra(DownloadService.EXTRA_RUNNING, true)) {
@@ -140,6 +163,10 @@ class BrowserSessionActivity : AppCompatActivity() {
 
         pageUrl = intent.getStringExtra(EXTRA_PAGE_URL).orEmpty()
         mode = intent.getStringExtra(EXTRA_MODE) ?: MODE_DOWNLOAD
+        if (intent.getBooleanExtra(EXTRA_RECOVERY, false)) {
+            recoveryTaskId = intent.getStringExtra(TransferQueue.JOB).orEmpty()
+            if (recoveryTaskId.isNotBlank()) captureLease = recoveryTaskId
+        }
         if (!pageUrl.startsWith("http://") && !pageUrl.startsWith("https://")) {
             finish()
             return
@@ -175,27 +202,113 @@ class BrowserSessionActivity : AppCompatActivity() {
             databaseEnabled = true
             loadsImagesAutomatically = true
         }
-        // Capture the cookies WebView actually sends to each media URL, including
-        // partitioned cookies on supported WebView versions.
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.COOKIE_INTERCEPT)) {
-            WebSettingsCompat.setCookiesIncludedInShouldInterceptRequest(
-                binding.webView.settings, true)
+        BrowserCookieInterception.enable(binding.webView.settings)
+        BrowserPageZoom.install(binding.webView,binding.browserZoomInButton,
+            binding.browserZoomOutButton,binding.browserResetZoomButton)
+        binding.browserBackButton.setOnClickListener {
+            if(binding.webView.canGoBack()) {
+                binding.webView.goBack()
+                MonitoringStore.log(this,"Browser Assist back navigation; recording state retained")
+            }
         }
+        val browserNavigation = BrowserWebNavigation.Session()
+        var appLinkBlocked = false
+        fun handleAppLink(request: WebResourceRequest?): Boolean {
+            if (request == null) return false
+            val link = request.url
+            if (!BrowserWebNavigation.isAppScheme(link.scheme)) return false
+            if (request.isForMainFrame && !captureActive && !nativeRecordingActive && !nativeRecordingCompleted) {
+                val webTarget = browserNavigation.recover(link.toString(), request.hasGesture() && !request.isRedirect)
+                appLinkBlocked = webTarget == null
+                if (webTarget != null) binding.webView.loadUrl(webTarget)
+                else binding.browserStatus.text = BrowserWebNavigation.APP_LINK_BLOCKED
+            }
+            return true
+        }
+        binding.webView.settings.setSupportMultipleWindows(true)
+        binding.webView.webChromeClient=object: android.webkit.WebChromeClient() {
+            override fun onCreateWindow(view: WebView?,dialog: Boolean,userGesture: Boolean,message: android.os.Message?): Boolean {
+                // Fold explicit popup navigation into the existing history. Block unsolicited popups.
+                if(!userGesture || message==null) return false
+                val popup=WebView(this@BrowserSessionActivity)
+                popup.webViewClient=object: WebViewClient() {
+                    override fun shouldOverrideUrlLoading(v: WebView?,request: WebResourceRequest?): Boolean {
+                        if(request?.isForMainFrame != true) return true
+                        if(!handleAppLink(request) && BrowserWebNavigation.isWebScheme(request.url.scheme)) {
+                            appLinkBlocked = false
+                            binding.webView.loadUrl(browserNavigation.open(request.url.toString()))
+                        }
+                        binding.webView.post { popup.destroy() }
+                        return true
+                    }
+                }
+                (message.obj as? WebView.WebViewTransport)?.webView=popup
+                message.sendToTarget()
+                return true
+            }
+        }
+        if(mode==MODE_DOWNLOAD) downloadDiscovery=BrowserDownloadDiscovery(this,binding.webView,pageUrl,
+            status={ binding.browserStatus.text=it },completed={ setResult(Activity.RESULT_OK,it);finish() })
         binding.webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                if (handleAppLink(request)) return true
+                if (request?.isForMainFrame == true && request.hasGesture() && !request.isRedirect &&
+                    BrowserWebNavigation.isWebScheme(request.url.scheme)) {
+                    appLinkBlocked = false
+                    val original = request.url.toString()
+                    val target = browserNavigation.open(original)
+                    if (target != original && view != null) {
+                        view.loadUrl(target)
+                        return true
+                    }
+                }
+                return false
+            }
+            override fun doUpdateVisitedHistory(view: WebView?,url: String?,isReload: Boolean) {
+                binding.browserBackButton.isEnabled=binding.webView.canGoBack()
+            }
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
                 request?.url?.toString()?.let { candidate ->
+                    downloadDiscovery?.observe(candidate,request.requestHeaders)
+                    if (request.isForMainFrame) {
+                        pageRequestUrl = candidate
+                        pageRequestHeaders = WebpageAccessDiagnostic.pageHeaders(request.requestHeaders)
+                    }
+                    val path = request.url.path.orEmpty().lowercase()
+                    val observation = when {
+                        path.endsWith(".m3u8") -> "delivery_hls_request_observed"
+                        path.endsWith(".mpd") -> "delivery_dash_request_observed"
+                        path.endsWith(".mp4") || path.endsWith(".webm") -> "delivery_direct_media_request_observed"
+                        else -> null
+                    }
+                    if (observation != null && deliveryObservations.add(observation)) {
+                        binding.webView.post { recordBrowserEvent(observation) }
+                    }
+                    if (request.requestHeaders.keys.any { it.equals("range", true) } &&
+                        deliveryObservations.add("delivery_byte_range_request_observed")) {
+                        binding.webView.post { recordBrowserEvent("delivery_byte_range_request_observed") }
+                    }
                     if (MediaUrlClassifier.isDirectMediaUrl(candidate)) {
                         val now = System.currentTimeMillis()
                         val headers = request.requestHeaders
                             .filterKeys { it.lowercase() in SAFE_CAPTURED_HEADERS }
+                        if (mode == MODE_RECORD && MouflonPlaylistResolver.observe(candidate, headers +
+                                mapOf("Cookie" to (headers.entries.firstOrNull { it.key.equals("cookie", true) }?.value
+                                    ?: CookieManager.getInstance().getCookie(candidate).orEmpty())))) {
+                            if (nativeRecordingActive) binding.webView.post {
+                                recordBrowserEvent("mouflon_browser_request_observed",
+                                    if (path.endsWith(".m3u8")) "playlist request; values omitted" else "segment/init request; values omitted")
+                            }
+                        }
                         mediaCandidates.compute(candidate) { _, existing ->
                             MediaCandidate(candidate, now, headers.ifEmpty { existing?.headers.orEmpty() })
                         }
                         if (MediaUrlClassifier.isContinuousManifest(candidate)) {
                             binding.webView.post {
                                 if (nativeRecordingActive && !waitingForActualStream) {
-                                    if (sameRendition(renewalVideoUrl, candidate)) offerRenewal("video", renewalVideoUrl)
-                                    if (sameRendition(renewalAudioUrl, candidate)) offerRenewal("audio", renewalAudioUrl)
+                                    syncRecorderRenditions()
+                                    if (sameRendition(renewalVideoUrl, candidate)) offerRenewal("video")
+                                    if (sameRendition(renewalAudioUrl, candidate)) offerRenewal("audio")
                                 }
                             }
                         }
@@ -204,17 +317,46 @@ class BrowserSessionActivity : AppCompatActivity() {
                 return super.shouldInterceptRequest(view, request)
             }
 
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                downloadDiscovery?.navigation()
+                mainPageHttpError = null
+                pageLoadObservation = "navigation started; result not yet observed"
+                super.onPageStarted(view, url, favicon)
+            }
+
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, response: android.webkit.WebResourceResponse?) {
+                if (request?.isForMainFrame == true) {
+                    mainPageHttpError = response?.statusCode
+                    pageLoadObservation = "main-frame HTTP error=${response?.statusCode}; page rendering not verified"
+                    if (nativeRecordingActive) recordBrowserEvent("browser_page_http_error", "HTTP=${response?.statusCode}")
+                }
+                super.onReceivedHttpError(view, request, response)
+            }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                if (request?.isForMainFrame == true) {
+                    mainPageHttpError = -1
+                    pageLoadObservation = "main-frame network error=${error?.errorCode}"
+                }
+                super.onReceivedError(view, request, error)
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
+                view?.let { MonitoringSession.observePage(it,"browser-page-finished") }
+                if (mainPageHttpError == null) browserNavigation.pageVisible(url)
+                downloadDiscovery?.ready()
+                binding.browserBackButton.isEnabled=binding.webView.canGoBack()
+                if (mainPageHttpError == null) pageLoadObservation = "page-finished observed; no main-frame HTTP error observed; content/playback not verified"
                 if (nativeRecordingActive) {
-                    recordBrowserEvent("browser_page_finished")
+                    recordBrowserEvent("browser_page_finished", pageLoadObservation)
                     checkPlayerAfterReload()
                     return
                 }
                 if (captureActive || nativeRecordingActive || nativeRecordingCompleted) return
-                binding.browserStatus.text = if (mode == MODE_RECORD) {
-                    "Play and unmute the actual video, then tap Find stream & record."
-                } else {
-                    "Play the video briefly, then tap Detect and download."
+                binding.browserStatus.text = when {
+                    appLinkBlocked -> BrowserWebNavigation.APP_LINK_BLOCKED
+                    mode == MODE_RECORD -> "Play and unmute the actual video, then tap Find stream & record."
+                    else -> "Play the video briefly, then tap Detect and download."
                 }
             }
         }
@@ -226,13 +368,14 @@ class BrowserSessionActivity : AppCompatActivity() {
                     binding.cancelButton.isEnabled = false
                     binding.browserStatus.text = "Stopping and saving the recording…"
                     startService(Intent(this, RecordingService::class.java)
-                        .setAction(RecordingService.ACTION_STOP_SAVE))
+                        .setAction(RecordingService.ACTION_STOP_SAVE).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
                 }
                 else -> finish()
             }
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if(binding.webView.canGoBack()) { binding.webView.goBack();return }
                 if (nativeRecordingActive) {
                     AlertDialog.Builder(this@BrowserSessionActivity)
                         .setTitle("Leave the playing stream?")
@@ -250,13 +393,16 @@ class BrowserSessionActivity : AppCompatActivity() {
                     binding.cancelButton.isEnabled = false
                     binding.browserStatus.text = "Stopping and saving the recording…"
                     startService(Intent(this, RecordingService::class.java)
-                        .setAction(RecordingService.ACTION_STOP_SAVE))
+                        .setAction(RecordingService.ACTION_STOP_SAVE).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
                 } else findContinuousRecordingStream()
             } else detectMedia()
         }
         binding.checkPlayingStreamButton.setOnClickListener {
             if (nativeRecordingActive) {
                 recordBrowserEvent("manual_403_stream_check_requested")
+                recoveryGeneration++
+                lastRenewalOffer.clear()
+                verifiedRecoveryTracks.clear()
                 waitingForActualStream = true
                 binding.browserStatus.text = "Checking the playing video for renewed stream URLs…"
                 checkPlayerAfterReload()
@@ -271,12 +417,12 @@ class BrowserSessionActivity : AppCompatActivity() {
                 binding.cancelButton.isEnabled = false
                 binding.browserStatus.text = "Stopping and saving the captured recording…"
                 startService(Intent(this, RecordingService::class.java)
-                    .setAction(RecordingService.ACTION_STOP_SAVE))
+                    .setAction(RecordingService.ACTION_STOP_SAVE).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
             }
         }
         binding.useMediaButton.text = if (mode == MODE_RECORD) "Find stream & record" else "Detect and download"
         if (intent.getBooleanExtra(EXTRA_RECOVERY, false)) enterRecovery()
-        binding.webView.loadUrl(pageUrl)
+        binding.webView.loadUrl(browserNavigation.open(pageUrl))
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -286,19 +432,19 @@ class BrowserSessionActivity : AppCompatActivity() {
     }
 
     private fun enterRecovery() {
-        if (mode != MODE_RECORD || !DownloadState.running ||
-            DownloadState.operation != DownloadState.OPERATION_RECORD ||
-            !DownloadState.recording403RecoveryAvailable) return
+        if (mode != MODE_RECORD || !mediaState.running ||
+            mediaState.operation != mediaState.OPERATION_RECORD ||
+            !mediaState.recording403RecoveryAvailable) return
         if (!nativeRecordingActive) {
-            renewalVideoUrl = DownloadState.recordingVideoUrl
-            renewalAudioUrl = DownloadState.recordingAudioUrl
+            renewalVideoUrl = mediaState.recordingVideoUrl
+            renewalAudioUrl = mediaState.recordingAudioUrl
             if (renewalVideoUrl.isBlank()) return
             nativeRecordingActive = true
             binding.useMediaButton.text = "Stop & save"
             pollHandler.removeCallbacks(renewalPoll)
             pollHandler.postDelayed(renewalPoll, 20_000L)
         }
-        waitingForActualStream = true
+        beginFreshRecovery("manual")
         binding.streamRecoveryControls.visibility = View.VISIBLE
         binding.recoveryStopSaveButton.isEnabled = true
         binding.checkPlayingStreamButton.isEnabled = true
@@ -307,7 +453,7 @@ class BrowserSessionActivity : AppCompatActivity() {
     }
 
     private fun findContinuousRecordingStream() {
-        if (DownloadState.running) {
+        if (mediaState.running) {
             binding.browserStatus.text = "Finish the current process before recording."
             return
         }
@@ -321,7 +467,10 @@ class BrowserSessionActivity : AppCompatActivity() {
               const urls = video ? [video.currentSrc, video.src].concat(
                 Array.from(video.querySelectorAll('source')).map(s => s.src)).filter(Boolean) : [];
               return JSON.stringify({playing: !!video, ad: ad, urls: urls,
-                resources: performance.getEntriesByType('resource').slice(-500).map(r => r.name)});
+                resources: performance.getEntriesByType('resource').slice(-500).map(r => r.name),
+                blob: !!video && (video.currentSrc || video.src || '').startsWith('blob:'),
+                srcObject: !!video && !!video.srcObject,
+                drm: !!video && !!video.mediaKeys});
             })();
         """.trimIndent()) { raw ->
             val payload = parseBrowserResponse(raw)
@@ -351,12 +500,15 @@ class BrowserSessionActivity : AppCompatActivity() {
                 binding.browserStatus.text = "No continuous HLS/DASH playlist was found. This player may use short segments or a protected stream; it cannot be safely recorded in the background."
                 return@evaluateJavascript
             }
+            streamDiagnostics = StreamDeliveryDiagnostics.describeUrl(primary?.url.orEmpty()) +
+                " Browser evidence: blob=${payload.optBoolean("blob")}, media stream object=${payload.optBoolean("srcObject")}, media keys=${payload.optBoolean("drm")}. " +
+                "Blob does not distinguish MediaSource from other blob playback; media stream object does not prove WebRTC."
             binding.useMediaButton.isEnabled = false
             binding.browserStatus.text = "Checking the selected playlist for audio…"
             val userAgent = binding.webView.settings.userAgentString
             val playlistCookie = primary?.let { CookieManager.getInstance().getCookie(it.url).orEmpty() }.orEmpty()
             lifecycleScope.launch {
-                val inspection = if (primary != null && primary.url.substringBefore('?').endsWith(".m3u8", true)) {
+                val inspection = if (primary != null && MediaUrlClassifier.isContinuousManifest(primary.url)) {
                     withContext(Dispatchers.IO) { inspectRecordingPlaylist(primary, currentPage, userAgent, playlistCookie) }
                 } else StreamManifestAudio.Inspection(StreamManifestAudio.Status.UNKNOWN)
                 if (isFinishing || isDestroyed) return@launch
@@ -404,6 +556,8 @@ class BrowserSessionActivity : AppCompatActivity() {
             val requestCookie = candidate.header("cookie").ifBlank { cookie }
             if (requestCookie.isNotBlank()) connection.setRequestProperty("Cookie", requestCookie)
             try {
+                val status = connection.responseCode
+                streamDiagnostics += "\nManifest inspection HTTP=$status; header values omitted."
                 val content = InputStreamReader(connection.inputStream, Charsets.UTF_8).use { reader ->
                     val text = StringBuilder()
                     val chars = CharArray(4096)
@@ -414,12 +568,14 @@ class BrowserSessionActivity : AppCompatActivity() {
                     }
                     text.toString()
                 }
+                streamDiagnostics += "\n" + StreamDeliveryDiagnostics.describe(candidate.url, content)
                 StreamManifestAudio.inspect(candidate.url, content)
             } finally { connection.disconnect() }
+        }.onFailure {
+            streamDiagnostics += "\nManifest inspection failed: ${it.javaClass.simpleName}; live status and tracks unknown."
         }.getOrDefault(StreamManifestAudio.Inspection(StreamManifestAudio.Status.UNKNOWN))
 
     private fun launchNativeRecording(video: String, audio: MediaCandidate?, primary: MediaCandidate?, page: String) {
-        if (DownloadState.running) return
         val delaySeconds = binding.audioDelayInput.text.toString().trim().replace(',', '.').toDoubleOrNull()
         if (delaySeconds == null || !delaySeconds.isFinite() || delaySeconds !in -10.0..10.0) {
             binding.browserStatus.text = "Enter an audio sync adjustment between -10 and +10 seconds. Use 0 if unsure."
@@ -438,9 +594,15 @@ class BrowserSessionActivity : AppCompatActivity() {
         } ?: primary?.takeIf { it.url == video }
         val videoHeaders = (videoCandidate?.headers ?: primary?.headers.orEmpty())
             .filterKeys { !it.equals("cookie", ignoreCase = true) }
-        val request = Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_START).apply {
+        val request = Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_START).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }).apply {
             putExtra(RecordingService.EXTRA_URL, video)
-            putExtra(RecordingService.EXTRA_PAGE_URL, pageUrl)
+            val originalPage = binding.webView.url?.takeIf { it.startsWith("https://") || it.startsWith("http://") } ?: pageUrl
+            putExtra(RecordingService.EXTRA_PAGE_URL, originalPage)
+            putExtra(RecordingService.EXTRA_PAGE_COOKIES, CookieManager.getInstance().getCookie(originalPage).orEmpty())
+            putExtra(RecordingService.EXTRA_PAGE_USER_AGENT, binding.webView.settings.userAgentString)
+            val capturedPageHeaders = if (WebpageAccessDiagnostic.sameOrigin(pageRequestUrl, originalPage)) pageRequestHeaders else emptyMap()
+            putExtra(RecordingService.EXTRA_PAGE_HEADERS_JSON, JSONObject(WebpageAccessDiagnostic.pageHeaders(capturedPageHeaders)).toString())
+            putExtra(RecordingService.EXTRA_PAGE_OBSERVATION, pageLoadObservation)
             putExtra(RecordingService.EXTRA_AUDIO_URL, audio?.url.orEmpty())
             putExtra(RecordingService.EXTRA_AUDIO_DELAY_MS, delayMs)
             putExtra(RecordingService.EXTRA_REFERER, primary?.header("referer").orEmpty().ifBlank { page })
@@ -451,9 +613,15 @@ class BrowserSessionActivity : AppCompatActivity() {
                 .ifBlank { binding.webView.settings.userAgentString })
             putExtra(RecordingService.EXTRA_HEADERS_JSON, JSONObject(videoHeaders).toString())
             putExtra(RecordingService.EXTRA_AUDIO_HEADERS_JSON, JSONObject(audio?.headers.orEmpty()).toString())
+            putExtra(RecordingService.EXTRA_STREAM_DIAGNOSTICS, streamDiagnostics + "\nNetwork observations: " + synchronized(deliveryObservations) { deliveryObservations.sorted().joinToString(", ") })
         }
         try {
-            ContextCompat.startForegroundService(this, request)
+            val id=TransferQueue.submit(this,request,"Browser-assisted stream recording",true,"")
+            captureLease=id;captureAttempt=TransferQueue.jobs(this).find { it.optString("id")==id }?.optString("lease").orEmpty()
+            if(!TransferQueue.owns(this,id)) {
+                binding.browserStatus.text="Live stream queued. Open Queue & history to prioritize it; fresh detection may be needed."
+                startActivity(Intent(this,TransferQueueActivity::class.java));return
+            }
             getSharedPreferences("recording_audio_sync", MODE_PRIVATE).edit()
                 .putInt(audioSyncPreferenceKey(), delayMs).apply()
             // The site may issue fresh short-lived media URLs while its player
@@ -486,25 +654,61 @@ class BrowserSessionActivity : AppCompatActivity() {
 
     private fun sameRendition(original: String, fresh: String): Boolean =
         original.isNotBlank() && MediaUrlClassifier.isContinuousManifest(fresh) &&
-            runCatching { java.net.URI(original).rawPath == java.net.URI(fresh).rawPath &&
-                MediaUrlClassifier.sameStreamFamily(original, fresh) }.getOrDefault(false)
+            RecordingRenewalTarget.sameRoute(original, fresh) &&
+            MediaUrlClassifier.sameStreamFamily(original, fresh)
 
-    private fun recordBrowserEvent(code: String) {
+    private fun recordBrowserEvent(code: String, detail: String = "") {
         if (!nativeRecordingActive) return
         runCatching {
             startService(Intent(this, RecordingService::class.java)
-                .setAction(RecordingService.ACTION_BROWSER_EVENT)
-                .putExtra(RecordingService.EXTRA_EVENT_CODE, code))
+                .setAction(RecordingService.ACTION_BROWSER_EVENT).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) })
+                .putExtra(RecordingService.EXTRA_EVENT_CODE, code)
+                .putExtra(RecordingService.EXTRA_EVENT_DETAIL, detail))
+        }
+    }
+
+    private fun beginFreshRecovery(reason: String) {
+        recoveryGeneration++
+        mediaCandidates.clear()
+        lastRenewalOffer.clear()
+        verifiedRecoveryTracks.clear()
+        waitingForActualStream = true
+        // Forget observations, never cookies, DOM storage, or the captured file.
+        binding.webView.evaluateJavascript("performance.clearResourceTimings();", null)
+        recordBrowserEvent("fresh_detection_started_$reason")
+    }
+
+    private fun syncRecorderRenditions() {
+        // Preflight may resolve a master to the actual media rendition. Renew
+        // that verified track, retaining the existing same-rendition checks.
+        if (mediaState.running && mediaState.operation == mediaState.OPERATION_RECORD &&
+            mediaState.recordingVideoUrl.isNotBlank()) {
+            val video = mediaState.recordingVideoUrl
+            val audio = mediaState.recordingAudioUrl
+            if (renewalVideoUrl != video || renewalAudioUrl != audio) {
+                renewalVideoUrl = video
+                renewalAudioUrl = audio
+                lastRenewalOffer.clear()
+                verifiedRecoveryTracks.clear()
+                recordBrowserEvent("browser_renewal_targets_updated_from_recorder")
+            }
         }
     }
 
     private fun checkPlayerAfterReload() {
+        syncRecorderRenditions()
         if (!waitingForActualStream || !nativeRecordingActive) return
         binding.webView.evaluateJavascript("""
             (function() {
               const ad = !!document.querySelector('.ad-showing, .ad-playing, .video-ads, .ima-ad-container, [data-ad-state="playing"]');
               const playing = Array.from(document.querySelectorAll('video')).some(v => !v.paused && !v.ended && v.readyState >= 2);
-              return JSON.stringify({ad:ad, playing:playing});
+              const media = Array.from(document.querySelectorAll('video,audio'));
+              return JSON.stringify({ad:ad, playing:playing,
+                urls: media.filter(v => !v.paused && !v.ended).map(v => v.currentSrc || v.src),
+                resources: performance.getEntriesByType('resource').slice(-500).map(r => r.name),
+                blob: media.some(v => (v.currentSrc || v.src || '').startsWith('blob:')),
+                srcObject: media.some(v => !!v.srcObject),
+                drm: media.some(v => !!v.mediaKeys)});
             })();
         """.trimIndent()) { raw ->
             if (!nativeRecordingActive || !waitingForActualStream) return@evaluateJavascript
@@ -512,14 +716,21 @@ class BrowserSessionActivity : AppCompatActivity() {
             when {
                 result?.optBoolean("ad") == true -> recordBrowserEvent("browser_reload_waiting_for_ad")
                 result?.optBoolean("playing") == true -> {
-                    waitingForActualStream = false
+                    val now = System.currentTimeMillis()
+                    (result.optJSONArray("urls").toStringList() + result.optJSONArray("resources").toStringList())
+                        .filter(MediaUrlClassifier::isContinuousManifest).forEach { url ->
+                            mediaCandidates.putIfAbsent(url, MediaCandidate(url, now, emptyMap()))
+                        }
                     recordBrowserEvent("browser_reload_actual_stream_playing")
+                    if (result.optBoolean("blob")) recordBrowserEvent("delivery_blob_observed")
+                    if (result.optBoolean("srcObject")) recordBrowserEvent("delivery_media_stream_object_observed")
+                    if (result.optBoolean("drm")) recordBrowserEvent("delivery_media_keys_observed")
                     val recent = mediaCandidates.values.any {
                         System.currentTimeMillis() - it.capturedAtMs in 0L..45_000L &&
                             (sameRendition(renewalVideoUrl, it.url) || sameRendition(renewalAudioUrl, it.url))
                     }
-                    offerRenewal("video", renewalVideoUrl)
-                    offerRenewal("audio", renewalAudioUrl)
+                    offerRenewal("video")
+                    offerRenewal("audio")
                     if (binding.streamRecoveryControls.visibility == View.VISIBLE) {
                         binding.browserStatus.text = if (recent)
                             "Fresh media found. The recorder is verifying it; return to the main screen to watch progress."
@@ -536,15 +747,63 @@ class BrowserSessionActivity : AppCompatActivity() {
         }
     }
 
-    private fun offerRenewal(kind: String, original: String) {
-        if (original.isBlank() || !nativeRecordingActive) return
+    private fun offerRenewal(kind: String) {
+        if (!nativeRecordingActive) return
+        syncRecorderRenditions()
+        // Request callbacks can run before the next 20-second poll. The recorder
+        // may already have replaced a master URL with its verified rendition.
+        val target = if (kind == "audio") renewalAudioUrl else renewalVideoUrl
+        if (target.isBlank()) return
         val now = System.currentTimeMillis()
         val candidate = mediaCandidates.values.filter { media ->
-            now - media.capturedAtMs in 0L..45_000L && sameRendition(original, media.url)
+            now - media.capturedAtMs in 0L..45_000L && sameRendition(target, media.url)
         }.maxByOrNull(MediaCandidate::capturedAtMs) ?: run {
             recordBrowserEvent(if (kind == "audio") "audio_renewal_no_fresh_candidate" else "video_renewal_no_fresh_candidate")
             return
         }
+        if (waitingForActualStream) {
+            if (!renewalChecks.add(kind)) return
+            val generation = recoveryGeneration
+            recordBrowserEvent("${kind}_recovery_verification_started")
+            val agent = binding.webView.settings.userAgentString
+            val page = binding.webView.url ?: pageUrl
+            val cookie = candidate.header("cookie").ifBlank {
+                CookieManager.getInstance().getCookie(candidate.url).orEmpty()
+            }
+            val verifiedCandidate = candidate.copy(headers = candidate.headers + mapOf(
+                "Cookie" to cookie, "User-Agent" to candidate.header("user-agent").ifBlank { agent },
+                "Referer" to candidate.header("referer").ifBlank { page }))
+            lifecycleScope.launch {
+                val valid = withContext(Dispatchers.IO) {
+                    StreamDeliveryDiagnostics.verifyHls(candidate.url, verifiedCandidate.header("user-agent"),
+                        verifiedCandidate.header("referer"), cookie, verifiedCandidate.headers)
+                }
+                renewalChecks.remove(kind)
+                if (!nativeRecordingActive || generation != recoveryGeneration) return@launch
+                syncRecorderRenditions()
+                val activeTarget = if (kind == "audio") renewalAudioUrl else renewalVideoUrl
+                if (!sameRendition(activeTarget, verifiedCandidate.url)) {
+                    recordBrowserEvent("${kind}_recovery_stale_target_discarded")
+                    return@launch
+                }
+                recordBrowserEvent("${kind}_recovery_verification_" + (if (valid.valid) "passed" else "failed"), valid.detail)
+                if (valid.valid) {
+                    // Keep the candidate that was actually verified, not a newer unverified request.
+                    if (!offerVerifiedRenewal(kind, verifiedCandidate, true)) return@launch
+                    verifiedRecoveryTracks.add(kind)
+                    if ("video" in verifiedRecoveryTracks &&
+                        (renewalAudioUrl.isBlank() || "audio" in verifiedRecoveryTracks)) {
+                        waitingForActualStream = false
+                        recordBrowserEvent("recovery_handoff_sent_waiting_for_media")
+                    }
+                }
+            }
+            return
+        }
+        offerVerifiedRenewal(kind, candidate, false)
+    }
+
+    private fun offerVerifiedRenewal(kind: String, candidate: MediaCandidate, force: Boolean): Boolean {
         val cookie = candidate.header("cookie").ifBlank {
             CookieManager.getInstance().getCookie(candidate.url).orEmpty()
         }
@@ -558,13 +817,14 @@ class BrowserSessionActivity : AppCompatActivity() {
         val stableUrl = candidate.url.substringBefore('?') +
             (if (stableQuery.isNotEmpty()) "?$stableQuery" else "")
         val signature = stableUrl + "\n" + cookie + "\n" + headers.toSortedMap().toString()
-        if (lastRenewalOffer[kind] == signature) {
+        if (!force && lastRenewalOffer[kind] == signature) {
             recordBrowserEvent(if (kind == "audio") "audio_renewal_credentials_unchanged" else "video_renewal_credentials_unchanged")
-            return
+            return false
         }
         recordBrowserEvent(if (kind == "audio") "audio_renewal_offer_attempt" else "video_renewal_offer_attempt")
-        val update = Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_RENEW_STREAM).apply {
+        val update = Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_RENEW_STREAM).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }).apply {
             putExtra(RecordingService.EXTRA_RENEW_KIND, kind)
+            putExtra(RecordingService.EXTRA_RENEW_FORCE, force)
             putExtra(RecordingService.EXTRA_URL, candidate.url)
             putExtra(RecordingService.EXTRA_COOKIES, cookie)
             putExtra(RecordingService.EXTRA_REFERER, candidate.header("referer").ifBlank { pageUrl })
@@ -572,21 +832,28 @@ class BrowserSessionActivity : AppCompatActivity() {
                 .ifBlank { binding.webView.settings.userAgentString })
             putExtra(RecordingService.EXTRA_HEADERS_JSON, JSONObject(headers).toString())
         }
-        runCatching { startService(update) }
+        return runCatching { startService(update) }
             .onSuccess {
                 lastRenewalOffer[kind] = signature
                 recordBrowserEvent(if (kind == "audio") "audio_renewal_offer_sent" else "video_renewal_offer_sent")
             }
             .onFailure {
                 recordBrowserEvent(if (kind == "audio") "audio_renewal_offer_failed" else "video_renewal_offer_failed")
-            }
+            }.isSuccess
     }
 
+    private var captureLease = ""
+    private var captureAttempt = ""
     private fun startBrowserRecording() {
-        if (DownloadState.running) {
-            binding.browserStatus.text = "Finish the current process before recording."
-            return
+        val reserveRequest=Intent(this,RecordingService::class.java).setAction(RecordingService.ACTION_BROWSER_START).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) })
+            .putExtra(RecordingService.EXTRA_PAGE_URL,pageUrl)
+        val lease=TransferQueue.reserve(this,reserveRequest,"Browser element recording","")
+        if(lease==null) {
+            TransferQueue.submit(this,reserveRequest,"Browser element recording",true,"")
+            binding.browserStatus.text="Queued. Open Queue & history to prioritize; return here for fresh browser detection."
+            startActivity(Intent(this,TransferQueueActivity::class.java));return
         }
+        captureLease=lease;captureAttempt=TransferQueue.jobs(this).find { it.optString("id")==lease }?.optString("lease").orEmpty()
         binding.useMediaButton.isEnabled = false
         binding.cancelButton.isEnabled = false
         startPending = true
@@ -611,14 +878,14 @@ class BrowserSessionActivity : AppCompatActivity() {
                 val reason = (if (result == null || result.isNull("error")) "" else result.optString("error"))
                     .ifBlank { "Android WebView timed out while preparing the video element." }
                 binding.browserStatus.text = reason
-                DownloadState.log = (DownloadState.log + "\nBrowser recording setup: " + reason).takeLast(16_000)
+                TransferQueue.complete(this,captureLease,reason,"",false,captureAttempt)
+                mediaState.log = (mediaState.log + "\nBrowser recording setup: " + reason).takeLast(16_000)
                 binding.useMediaButton.isEnabled = true
                 return@evaluateJavascript
             }
             try {
                 BrowserCaptureStore.begin(applicationContext)
-                ContextCompat.startForegroundService(this, Intent(this, RecordingService::class.java)
-                    .setAction(RecordingService.ACTION_BROWSER_START))
+                TransferQueue.launchReserved(this,captureLease,Intent(this,RecordingService::class.java).setAction(RecordingService.ACTION_BROWSER_START).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }),captureAttempt)
             } catch (error: Exception) {
                 binding.webView.evaluateJavascript("window.__ytdlpElementCapture.discard()", null)
                 BrowserCaptureStore.discard()
@@ -673,7 +940,7 @@ class BrowserSessionActivity : AppCompatActivity() {
                 captureActive = false
                 binding.browserStatus.text = "Saving ${capturedBytes / 1024} KiB of captured video…"
                 startService(Intent(this, RecordingService::class.java)
-                    .setAction(RecordingService.ACTION_BROWSER_FINISH))
+                    .setAction(RecordingService.ACTION_BROWSER_FINISH).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
                 finish()
             } else {
                 if (capturedBytes > 0L) binding.browserStatus.text = "Recording video + available audio • ${capturedBytes / 1024} KiB"
@@ -694,18 +961,18 @@ class BrowserSessionActivity : AppCompatActivity() {
         if (!captureActive) return
         captureActive = false
         binding.webView.evaluateJavascript("window.__ytdlpElementCapture.discard()", null)
-        startService(Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_CANCEL))
+        startService(Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_CANCEL).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
         finish()
     }
 
     private fun abortBrowserRecording(message: String) {
-        DownloadState.log = (DownloadState.log + "\nBrowser recording stopped unexpectedly: " + message).takeLast(16_000)
+        mediaState.log = (mediaState.log + "\nBrowser recording stopped unexpectedly: " + message).takeLast(16_000)
         captureActive = false
         stopRequested = false
         capturedBytes = 0L
         binding.webView.evaluateJavascript("window.__ytdlpElementCapture.discard()", null)
         BrowserCaptureStore.discard()
-        startService(Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_CANCEL))
+        startService(Intent(this, RecordingService::class.java).setAction(RecordingService.ACTION_CANCEL).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
         binding.browserStatus.text = "Recording failed: $message"
         binding.useMediaButton.text = "Try recording again"
         binding.useMediaButton.isEnabled = true
@@ -724,96 +991,7 @@ class BrowserSessionActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun detectMedia() {
-        if (mode != MODE_DOWNLOAD) return
-        binding.browserStatus.text = "Looking for the active media stream…"
-        val script = """
-            (function() {
-              const visible = el => {
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                const s = getComputedStyle(el);
-                return r.width > 80 && r.height > 45 && s.display !== 'none' && s.visibility !== 'hidden';
-              };
-              const adSelectors = [
-                '.ad-showing', '.ad-playing', '.video-ads', '.ima-ad-container',
-                '[class*="adPlaying"]', '[class*="ad-playing"]', '[data-ad-state="playing"]'
-              ];
-              const adPlaying = adSelectors.some(selector =>
-                Array.from(document.querySelectorAll(selector)).some(visible)
-              );
-              const videos = Array.from(document.querySelectorAll('video'))
-                .filter(visible)
-                .sort((a, b) => {
-                  const aPlaying = !a.paused && !a.ended ? 1 : 0;
-                  const bPlaying = !b.paused && !b.ended ? 1 : 0;
-                  return (bPlaying - aPlaying) ||
-                    ((b.clientWidth * b.clientHeight) - (a.clientWidth * a.clientHeight));
-                });
-              const video = videos[0];
-              const sources = video ? Array.from(video.querySelectorAll('source')).map(s => s.src) : [];
-              const activeUrls = [video && video.currentSrc, video && video.src].concat(sources)
-                .filter(u => u && !u.startsWith('blob:'));
-              const resources = (performance.getEntriesByType('resource') || [])
-                .map(entry => entry.name)
-                .filter(Boolean)
-                .slice(-500);
-              return JSON.stringify({ adPlaying, activeUrls, resources });
-            })();
-        """.trimIndent()
-
-        binding.webView.evaluateJavascript(script) { raw ->
-            val payload = runCatching {
-                val encoded = JSONTokener(raw).nextValue() as? String ?: return@runCatching null
-                JSONObject(encoded)
-            }.getOrNull()
-            if (payload?.optBoolean("adPlaying") == true) {
-                // Do not allow URLs observed during the ad to remain eligible after it ends.
-                mediaCandidates.clear()
-                binding.browserStatus.text = "An in-video ad appears to be playing. Wait for the actual video, then try again."
-                Toast.makeText(this, "Wait for the ad to finish", Toast.LENGTH_LONG).show()
-                return@evaluateJavascript
-            }
-
-            val activeUrls = payload?.optJSONArray("activeUrls").toStringList()
-                .filter(MediaUrlClassifier::isDirectMediaUrl)
-            val now = System.currentTimeMillis()
-            activeUrls.forEach { url ->
-                mediaCandidates.compute(url) { _, existing ->
-                    MediaCandidate(url, now, existing?.headers.orEmpty())
-                }
-            }
-            payload?.optJSONArray("resources").toStringList()
-                .filter(MediaUrlClassifier::isDirectMediaUrl)
-                .forEach { url -> mediaCandidates.putIfAbsent(url, MediaCandidate(url, now, emptyMap())) }
-
-            val selected = selectBestCandidate(activeUrls.toSet())
-            if (selected == null) {
-                binding.browserStatus.text = "No direct, non-ad media stream detected. Play the actual video for a few seconds, then try again."
-                Toast.makeText(this, "No media stream detected", Toast.LENGTH_LONG).show()
-                return@evaluateJavascript
-            }
-            completeDownloadSelection(selected)
-        }
-    }
-
-    private fun completeDownloadSelection(primary: MediaCandidate) {
-        val currentPage = binding.webView.url ?: pageUrl
-        fun cookies(candidate: MediaCandidate): String = candidate.header("cookie").ifBlank {
-            CookieManager.getInstance().getCookie(candidate.url).orEmpty()
-                .ifBlank { CookieManager.getInstance().getCookie(currentPage).orEmpty() }
-        }
-        val result = Intent().apply {
-            putExtra(EXTRA_MEDIA_URL, primary.url)
-            putExtra(EXTRA_REFERER, primary.header("referer").ifBlank { currentPage })
-            putExtra(EXTRA_COOKIES, cookies(primary))
-            putExtra(EXTRA_USER_AGENT, primary.header("user-agent").ifBlank { binding.webView.settings.userAgentString })
-            putExtra(EXTRA_HEADERS_JSON, JSONObject(primary.headers).toString())
-            putExtra(EXTRA_MODE, MODE_DOWNLOAD)
-        }
-        setResult(Activity.RESULT_OK, result)
-        finish()
-    }
+    private fun detectMedia() { downloadDiscovery?.detect() }
 
     private fun selectBestCandidate(activeUrls: Set<String>): MediaCandidate? {
         // Keep download selection independent of the stream-recording classifier.
@@ -847,9 +1025,9 @@ class BrowserSessionActivity : AppCompatActivity() {
 
     override fun onUserInteraction() {
         super.onUserInteraction()
-        if (DownloadState.running && DownloadState.operation == DownloadState.OPERATION_RECORD) {
+        if (mediaState.running && mediaState.operation == mediaState.OPERATION_RECORD) {
             startService(Intent(this, RecordingService::class.java)
-                .setAction(RecordingService.ACTION_USER_INTERACTION))
+                .setAction(RecordingService.ACTION_USER_INTERACTION).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
         }
     }
 
@@ -862,6 +1040,8 @@ class BrowserSessionActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        MonitoringSession.flush(this,"browser leaving foreground; agreement/session state retained")
+        MonitoringSession.observePage(binding.webView,"browser-leaving")
         DownloadState.browserResumed = false
         super.onPause()
     }
@@ -874,6 +1054,10 @@ class BrowserSessionActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        downloadDiscovery?.close()
+        if(captureLease.isNotBlank() && TransferQueue.jobs(this).find { it.optString("id")==captureLease }?.optString("state")=="reserved")
+            TransferQueue.complete(this,captureLease,"Browser capture setup canceled","",false,captureAttempt)
+
         recordBrowserEvent("browser_session_destroyed")
         pollHandler.removeCallbacksAndMessages(null)
         if (startPending) binding.webView.evaluateJavascript("window.__ytdlpElementCapture?.discard()", null)
@@ -912,6 +1096,8 @@ class BrowserSessionActivity : AppCompatActivity() {
         const val EXTRA_COOKIES = "cookies"
         const val EXTRA_USER_AGENT = "user_agent"
         const val EXTRA_HEADERS_JSON = "headers_json"
+        const val EXTRA_DOWNLOAD_INFO_JSON = "download_info_json"
+        const val EXTRA_DOWNLOAD_DIAGNOSTICS = "download_diagnostics"
         const val EXTRA_MODE = "mode"
         const val MODE_DOWNLOAD = "download"
         const val MODE_RECORD = "record"

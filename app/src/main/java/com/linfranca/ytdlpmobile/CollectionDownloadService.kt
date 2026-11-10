@@ -31,8 +31,11 @@ internal object CollectionState {
 
 /** Independent of yt-dlp's DownloadService and the stream recorder. */
 class CollectionDownloadService : Service() {
+    private var historyId=""
     private val stopping = AtomicBoolean(false)
     private var worker: Thread? = null
+    private var diagnosticLog: java.io.File? = null
+    private var diagnosticStarted = 0L
     @Volatile private var activeMediaConnection: HttpURLConnection? = null
     @Volatile private var activeSourceConnection: HttpURLConnection? = null
 
@@ -68,6 +71,7 @@ class CollectionDownloadService : Service() {
             intent.getStringExtra(EXTRA_RULE34_KEY).orEmpty()
         )
         stopping.set(false)
+        historyId=CollectionJournal.begin(this,intent,"${route.site} — ${route.title}")
         CollectionState.running = true
         CollectionState.found = 0
         CollectionState.saved = 0
@@ -76,26 +80,38 @@ class CollectionDownloadService : Service() {
         CollectionState.pageTotal = 0
         CollectionState.pageProcessed = 0
         CollectionState.log = ""
+        diagnosticStarted = android.os.SystemClock.elapsedRealtime()
+        diagnosticLog = java.io.File(cacheDir, "collections-${System.currentTimeMillis()}-${java.util.UUID.randomUUID()}.txt").apply { writeText("Collection diagnostics v1.0.14; addresses and authentication values omitted.\n") }
         createChannel()
         startForeground(NOTIFICATION_ID, notification("Preparing ${route.site} collection…"))
         update("Finding files from ${route.site}…", "Collection started: ${route.site}, ${route.title}")
 
         worker = Thread({
+            var laneAcquired=false
             try {
+                CollectionLane.lock.lockInterruptibly();laneAcquired=true
+                StorageGuard.working(this,phase="collection download")
+                val retryRaw=intent.getStringExtra("collection_retry_items").orEmpty()
+                val retryItems=if(retryRaw.isBlank()) emptyList() else ComicStore.items(org.json.JSONArray(retryRaw))
+                val wanted=retryItems.map(CollectionJournal::key).toSet()
+                var retryFound=0
                 val folder = "yt-dlp Mobile/Collections/${safe(route.site)}/${safe(route.title)}"
                 CollectionSources(credentials, { stopping.get() }, { activeSourceConnection = it },
                     { event -> update("Finding collection files…", event) }) { page, items ->
                     if (stopping.get()) throw InterruptedException()
-                    CollectionState.found += items.size
+                    val selected=if(retryRaw.isBlank()) items else items.filter { CollectionJournal.key(it) in wanted }.also { retryFound+=it.size }
+                    CollectionJournal.discovered(this,historyId,selected)
+                    CollectionState.found += selected.size
                     CollectionState.pageTotal = items.size
                     CollectionState.pageProcessed = 0
                     update("Page $page • ${CollectionState.saved} saved, ${CollectionState.skipped} already saved",
                         "Page $page: found ${items.size} files.")
-                    for (item in items) {
+                    for (item in selected) {
                         if (stopping.get()) break
-                        val targetFolder = if (item.folder.isBlank()) folder else "$folder/${safe(item.folder)}"
+                        val targetFolder = if (item.folder.isBlank()) folder else "$folder/${item.folder.split('/').joinToString("/") { safe(it) }}"
                         val name = fileName(item)
                         if (existsInDownloads(targetFolder, name)) {
+                            CollectionJournal.result(this,historyId,item,"skipped")
                             CollectionState.skipped++
                             CollectionState.pageProcessed++
                             update("Page $page: ${CollectionState.pageProcessed}/${CollectionState.pageTotal} • ${CollectionState.skipped} already saved",
@@ -112,12 +128,20 @@ class CollectionDownloadService : Service() {
                             throw error
                         } catch (error: Exception) {
                             CollectionState.pageProcessed++
+                            CollectionJournal.result(this,historyId,item,"failed",error.javaClass.simpleName)
                             CollectionState.failed++
+                            if(StorageGuard.failure(error)) throw error
                             update("Page $page: ${CollectionState.pageProcessed}/${CollectionState.pageTotal} • ${CollectionState.failed} failed",
                                 "Failed $name: ${error.message ?: error.javaClass.simpleName}")
                         }
                     }
                 }.discover(route)
+                if(retryRaw.isNotBlank() && retryFound<wanted.size) {
+                    val missing=retryItems.filter { CollectionJournal.key(it) in wanted }
+                    CollectionJournal.discovered(this,historyId,missing)
+                    update("Some retry files were not rediscovered", "${wanted.size-retryFound} retry files were not exposed by the source; retained for review instead of reusing stale URLs.")
+                    CollectionState.failed+=wanted.size-retryFound
+                }
                 val message = when {
                     stopping.get() -> "Stopped. ${CollectionState.saved} files saved."
                     CollectionState.found == 0 -> "No downloadable files found for this link."
@@ -128,14 +152,17 @@ class CollectionDownloadService : Service() {
                 update("Stopped. ${CollectionState.saved} files saved.", "Collection stopped by user.")
             } catch (error: Exception) {
                 // Never log API keys, authorization headers or full media URLs.
-                update("Collection failed after ${CollectionState.saved} saved: ${error.message ?: "unknown error"}",
-                    "Error: ${error.message ?: error.javaClass.simpleName}")
+                val detail=if(StorageGuard.failure(error)) StorageGuard.MESSAGE+" Saved collection files are kept; retry pending files from Collection history." else error.message ?: "unknown error"
+                update("Collection failed after ${CollectionState.saved} saved: $detail", "Error: $detail")
             } finally {
                 activeMediaConnection?.disconnect()
                 activeMediaConnection = null
                 activeSourceConnection?.disconnect()
                 activeSourceConnection = null
                 CollectionState.running = false
+                if(laneAcquired) CollectionLane.lock.unlock()
+                saveDiagnosticLog()
+                CollectionJournal.finished(this,historyId,CollectionState.status,CollectionState.log)
                 publish()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 // A later Stop intent has a newer startId. End the service after the worker exits.
@@ -162,6 +189,7 @@ class CollectionDownloadService : Service() {
                 throw error
             } catch (error: Exception) {
                 if (stopping.get()) throw InterruptedException()
+                if(StorageGuard.failure(error)) throw error
                 if (error is MediaHttpError && error.status in 400..499 && error.status != 429)
                     throw error
                 lastError = error
@@ -187,13 +215,19 @@ class CollectionDownloadService : Service() {
         try {
             connection.connectTimeout = 15_000
             connection.readTimeout = 30_000
-            connection.setRequestProperty("User-Agent", "yt-dlp Mobile/0.6.21 (Android; collection downloader)")
+            connection.setRequestProperty("User-Agent", "yt-dlp Mobile/1.0.14 (Android; collection downloader)")
+            if (item.referer.isNotBlank()) connection.setRequestProperty("Referer", item.referer)
+            android.webkit.CookieManager.getInstance().getCookie(item.url)?.takeIf(String::isNotBlank)?.let {
+                connection.setRequestProperty("Cookie", it)
+            }
             val code = connection.responseCode
             if (code !in 200..299) throw MediaHttpError(
                 code, connection.getHeaderField("Retry-After")?.toIntOrNull() ?: 0)
             val contentType = connection.contentType?.substringBefore(';')?.lowercase(Locale.ROOT).orEmpty()
             if (contentType.startsWith("text/") || contentType == "application/json")
                 throw IllegalStateException("Media server returned a webpage instead of a file.")
+            StorageGuard.destination(this,connection.contentLengthLong.coerceAtLeast(0))
+            val storage=StorageGuard.Watch(this)
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, name)
                 put(MediaStore.Downloads.MIME_TYPE, mime(item.extension))
@@ -211,6 +245,7 @@ class CollectionDownloadService : Service() {
                         if (stopping.get()) throw InterruptedException()
                         val count = input.read(buffer)
                         if (count < 0) break
+                        storage.poll()
                         output.write(buffer, 0, count)
                         total += count
                     }
@@ -220,6 +255,7 @@ class CollectionDownloadService : Service() {
             val published = contentResolver.update(
                 outputUri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
             if (published < 1) throw IllegalStateException("Android could not publish $name in Downloads.")
+            CollectionJournal.result(this,historyId,item,"saved",uri=outputUri.toString())
             uri = null
         } finally {
             if (uri != null) contentResolver.delete(uri, null, null)
@@ -257,9 +293,36 @@ class CollectionDownloadService : Service() {
         else -> "application/octet-stream"
     }
 
-    private fun update(status: String, logLine: String) {
-        CollectionState.status = status
-        CollectionState.log = (CollectionState.log + logLine + "\n").takeLast(14_000)
+    private fun saveDiagnosticLog() {
+        val file = diagnosticLog ?: return
+        var target: Uri? = null
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, file.name)
+                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/yt-dlp Mobile/Collections/Logs")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            target = contentResolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                ?: error("Could not create log")
+            contentResolver.openOutputStream(target, "w")!!.use { out -> file.inputStream().use { it.copyTo(out) } }
+            contentResolver.update(target, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+            target = null
+            CollectionState.log += "Detailed collection log saved to Downloads/yt-dlp Mobile/Collections/Logs/${file.name}\n"
+        } catch (_: Exception) {
+            target?.let { runCatching { contentResolver.delete(it, null, null) } }
+            CollectionState.log += "Detailed log export failed; private copy retained for this session.\n"
+        } finally { diagnosticLog = null }
+    }
+
+    @Synchronized private fun update(status: String, logLine: String) {
+        val safeStatus = FfmpegDiagnostic.safeLine(status) ?: "Collection update"
+        val safeLog = FfmpegDiagnostic.safeLine(logLine) ?: "Sensitive request details omitted."
+        CollectionState.status = safeStatus
+        diagnosticLog?.let { file ->
+            runCatching { file.appendText("+${(android.os.SystemClock.elapsedRealtime()-diagnosticStarted)/1000}s $safeLog\n") }
+        }
+        CollectionState.log = (CollectionState.log + safeLog + "\n").takeLast(14_000)
         publish()
         if (CollectionState.running) getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, notification(status))

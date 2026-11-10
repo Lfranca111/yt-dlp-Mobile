@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.viewpager2.widget.ViewPager2 xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/homePager"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent" />
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/homeShell" android:layout_width="match_parent"
+    android:layout_height="match_parent" android:orientation="vertical"
+    android:baselineAligned="false"
+    android:background="@color/polish_canvas">
+    <LinearLayout android:id="@+id/homeNavigation"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:background="@color/polish_canvas" />
+    <androidx.viewpager2.widget.ViewPager2 android:id="@+id/homePager"
+        android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+</LinearLayout>

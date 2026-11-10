@@ -41,7 +41,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 /** The Collections screen alone opens this editor. Main and its recorder are untouched. */
-class CollectionConvertActivity : AppCompatActivity() {
+class CollectionConvertActivity : DisplayActivity() {
     private val pages = mutableListOf<ComicFile>()
     private var videos = emptyList<ComicFile>()
     private var tree: Uri? = null
@@ -161,7 +161,10 @@ class CollectionConvertActivity : AppCompatActivity() {
         adapter = PageAdapter()
         list.adapter = adapter
         ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
+            override fun getMovementFlags(rv: RecyclerView,holder: RecyclerView.ViewHolder): Int =
+                if(holder.bindingAdapter===adapter) makeMovementFlags(ItemTouchHelper.UP or ItemTouchHelper.DOWN,0) else 0
             override fun onMove(rv: RecyclerView, from: RecyclerView.ViewHolder, to: RecyclerView.ViewHolder): Boolean {
+                if(from.bindingAdapter!==adapter || to.bindingAdapter!==adapter) return false
                 val old = from.bindingAdapterPosition; val next = to.bindingAdapterPosition
                 if (old !in pages.indices || next !in pages.indices) return false
                 Collections.swap(pages, old, next)
@@ -171,11 +174,11 @@ class CollectionConvertActivity : AppCompatActivity() {
             }
             override fun onSwiped(holder: RecyclerView.ViewHolder, direction: Int) = Unit
         }).attachToRecyclerView(list)
-        root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val outputControls=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
         status = TextView(this).apply { text = "Choose a folder or images to begin."; setPadding(0, dp(8), 0, dp(8)) }
-        root.addView(status)
+        outputControls.addView(status)
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-        root.addView(progressBar)
+        outputControls.addView(progressBar)
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         convert = MaterialButton(this).apply {
             text = "Make PDF"
@@ -188,8 +191,9 @@ class CollectionConvertActivity : AppCompatActivity() {
         }
         actions.addView(convert, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         actions.addView(cancel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(actions)
-        setContentView(root)
+        outputControls.addView(actions)
+        val shell=CollectionEditorLayout(this,root,list,outputControls,adapter)
+        setContentView(shell)
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             root.setPadding(dp(16) + bars.left, dp(12) + bars.top,

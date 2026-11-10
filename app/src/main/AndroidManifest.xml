@@ -1,14 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
+        android:name=".MediaApplication"
         android:allowBackup="false"
         android:extractNativeLibs="true"
         android:requestLegacyExternalStorage="true"
@@ -18,7 +25,22 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.YtDlpMobile">
 
-        <activity
+        <activity android:name=".AppSettingsActivity" android:exported="false" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode" android:theme="@style/Theme.YtDlpMobile.Panel" />
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.updates" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/app_update_paths" />
+        </provider>
+        <activity android:name=".DisplaySettingsActivity" android:exported="false" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"  android:theme="@style/Theme.YtDlpMobile.Panel" />
+
+        <service android:name=".RecoveryExportService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".MonitoringAlarmService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <receiver android:name=".MonitoringAlarmAccessReceiver" android:exported="false">
+            <intent-filter><action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" /></intent-filter>
+        </receiver>
+        <receiver android:name=".MonitoringWakeupReceiver" android:exported="false" />
+        <receiver android:name=".MonitoringRestoreReceiver" android:exported="false">
+            <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /><action android:name="android.intent.action.MY_PACKAGE_REPLACED" /></intent-filter>
+        </receiver>
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
@@ -32,21 +54,18 @@
             </intent-filter>
         </activity>
 
-        <activity
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
             android:name=".BrowserSessionActivity"
             android:exported="false"
-            android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.YtDlpMobile" />
 
-        <activity
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
             android:name=".InstructionsActivity"
-            android:exported="false"
-            android:theme="@style/Theme.YtDlpMobile" />
+            android:exported="false"  android:theme="@style/Theme.YtDlpMobile.Panel" />
 
-        <activity
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
             android:name=".CollectionConvertActivity"
-            android:exported="false"
-            android:theme="@style/Theme.YtDlpMobile" />
+            android:exported="false"  android:theme="@style/Theme.YtDlpMobile.Panel" />
 
         <service
             android:name=".DownloadService"
@@ -67,6 +86,13 @@
             android:name=".CollectionConvertService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode" android:name=".MonitoringBrowserSessionActivity" android:exported="false" android:theme="@style/Theme.YtDlpMobile" />
+        <service android:name=".MonitoringDownloadService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".MonitoringRecordingService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode" android:name=".CustomSourceActivity" android:exported="false" />
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode" android:name=".CrashReportsActivity" android:exported="false"  android:theme="@style/Theme.YtDlpMobile.Panel" />
+        <activity android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode" android:name=".TransferQueueActivity" android:exported="false"  android:theme="@style/Theme.YtDlpMobile.Panel" />
+        <service android:name="androidx.work.impl.foreground.SystemForegroundService" android:foregroundServiceType="dataSync" tools:node="merge" />
     </application>
 
 </manifest>

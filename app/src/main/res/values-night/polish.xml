@@ -1,0 +1,12 @@
+<resources>
+    <color name="polish_canvas">#100C16</color>
+    <color name="polish_panel">#1B1426</color>
+    <color name="polish_tonal">#2E1D48</color>
+    <color name="polish_text">#F5ECFF</color>
+    <color name="polish_muted">#C0B0D1</color>
+    <color name="polish_edge">#74608F</color>
+    <color name="polish_violet">#C7A5FF</color>
+    <color name="polish_amber">#FFD082</color>
+    <color name="polish_error">#FF9BB4</color>
+    <color name="polish_saved">#DBC4FF</color>
+</resources>

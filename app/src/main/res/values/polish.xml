@@ -1,0 +1,16 @@
+<resources>
+    <color name="polish_canvas">#FAF7FF</color>
+    <color name="polish_panel">#F0EAF8</color>
+    <color name="polish_tonal">#EDE2FF</color>
+    <color name="polish_text">#20172B</color>
+    <color name="polish_muted">#5F506C</color>
+    <color name="polish_edge">#A490BD</color>
+    <color name="polish_violet">#6331B4</color>
+    <color name="polish_amber">#805100</color>
+    <color name="polish_error">#A62345</color>
+    <color name="polish_saved">#4C208F</color>
+    <item name="polish_view_initialized" type="id" />
+    <item name="polish_motion_state" type="id" />
+    <item name="polish_monitor_root" type="id" />
+    <item name="polish_gradient_progress" type="id" />
+</resources>

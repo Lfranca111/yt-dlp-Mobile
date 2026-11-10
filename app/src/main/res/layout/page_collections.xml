@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<com.linfranca.ytdlpmobile.StableNestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:clipToPadding="false"
     android:fillViewport="true">
 
-    <LinearLayout
+    <com.linfranca.ytdlpmobile.AdaptiveContentLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
+        app:landscapeSplitAt="@id/collectionProgressBar"
         android:padding="20dp">
 
         <TextView
@@ -206,7 +207,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="30dp"
-            android:text="Recognized sites: E621, E6AI, E926, Furbooru, Luscious, Multporn, Rule34, Tailspace, Yiffer."
+            android:text="Recognized sites: E621, E6AI, E926, Furbooru, Luscious, Multporn, Rule34, Tailspace, Yiffer, nHentai, Doujins, HentaiFox, Hentai2Read, 8Muses, AllPornComic, ILikeComix, MyHentaiGallery, Honeytoon, ComicPorn.xxx."
             android:textAppearance="@style/TextAppearance.MaterialComponents.Caption" />
 
         <View
@@ -248,5 +249,5 @@
             android:text="●   ○  Collections"
             android:textColor="?attr/colorPrimary"
             android:textSize="14sp" />
-    </LinearLayout>
-</androidx.core.widget.NestedScrollView>
+    </com.linfranca.ytdlpmobile.AdaptiveContentLayout>
+</com.linfranca.ytdlpmobile.StableNestedScrollView>

@@ -1,24 +1,34 @@
 # Changelog
 
-## Unreleased
+## 1.0.74 — Release target
 
-Work after released **1.0.63**. Development **1.0.64** contains the changes below; it is not classified as a public release here. Future release updates are expected to focus on bug fixes and verification.
+Changes since public release **1.0.63**, consolidated into one release entry. This entry describes the source for the next public build; it does not certify an APK or indicate that a GitHub release has been published.
 
-### YouTube live preparation
+### Downloads, monitoring and recording
 
-- Prefer a complete HLS audio/video format over a higher-resolution video-only selection without matching audio.
-- Recover an advertised HLS manifest from exact-video live player data when browser playback uses SABR/UMP without requesting an HLS playlist.
-- Validate manifest scope/expiry, audio-group pairing and advancing live tracks in the added master-verification path; reject VOD, protection, mismatched video evidence and cancelled preparation.
-- Preserve existing recording engines and Browser Assist controls. Source/fixture checks passed; final device recording, sound and saving remain release checks.
+- VK Video Live monitoring accepts the channel root or its `/records` tab. Live checks use the root. Upload checks try the saved link first and try `/records` when the root has no verified finished replays. Both mode runs the checks separately. The first verified listing establishes a baseline without downloading older replays.
+- VK live preparation checks the channel API and page state, validates the same broadcast's public DASH source, carries its request headers into FFmpeg and waits for actual media output. Live recording remains unverified; the latest host attempt received HTTP 403 before capture.
+- Rumble verifies creator-owned finished uploads where it can, and keeps ambiguous listings preview-only. The embed metadata 403 guidance points to signed-in cookies and Browser Assist. Vimeo Browser Assist can pair verified video and audio playlists from the same playback.
+- Monitored downloads use a fresh private copy of imported cookies when available; otherwise they can use the saved in-app browser session. Access failures leave discovered items available for retry.
+- YouTube live preparation prefers complete audio/video, can recover an HLS manifest advertised by the exact video's player data, and verifies advancing tracks. A retryable startup failure can trigger one fresh HLS attempt, then one yt-dlp watch-page fallback for the same still-live video if no media was captured.
+- Stop & save can repair certain truncated MPEG-TS tails and warns when it cannot safely repair the end. Android 10/11 worker interruption and exact-alarm compatibility checks were corrected.
+- The [User Guide](docs/USER_GUIDE.md#troubleshooting) explains that any website or media host can return HTTP 403 and lists possible causes and troubleshooting steps.
 
-### Development validation
+### Layout, updates and recovery
 
-- Development 1.0.64: debug/release source compilation, 633 executed JVM tests with four skipped, and 52 browser-script assertions passed in the documented validation setup.
-- These later source/fixture results do not certify a signed APK or end-to-end phone recording and do not change what was included in release 1.0.63.
+- Wide landscape screens use a side panel for supported settings and secondary screens. Dropdown placement and conversion scrolling were corrected; conversion settings, page rows and actions scroll together in both orientations.
+- Main displays separate progress and controls for concurrent manual tasks, including per-recording Stop & save, Discard and recovery where available.
+- App updates check for stable APK releases and verify compatibility and signing before opening the Android installer. Optional APK backups and recovery settings export/import are separate from media, cookies and queue data. See the [User Guide](docs/USER_GUIDE.md#app-updates-and-recovery).
+
+### Validation and remaining limits
+
+- The full Android debug build and canonical unit suite passed on 1.0.71 (651 passed, two skipped). The last recorded full lint run reported three errors, addressed in source by a later patch but not rechecked with full lint. Two resume/cache integration failures still need fixture diagnosis.
+- The 1.0.74 focused run passed 22 tests. Both VK link forms returned the same 40 verified replays from the captured creator pages, and a host replay download decoded with audio and video. These are not final signed-APK or end-to-end Android monitoring results.
+- See the [per-site coverage tables](docs/USER_GUIDE.md#website-support-and-dedicated-handlers) for routes, test evidence, caveats and credential requirements.
 
 ## 1.0.63 — Released
 
-Current public release. This entry describes the accumulated feature set, not a claim that every feature was introduced in this one version or works on every website. The remaining development work is bug fixing; later YouTube fixes remain under Unreleased above.
+Previous public release and baseline for this changelog. This entry describes the accumulated feature set, not a claim that every feature was introduced in this one version or works on every website.
 
 ### Downloads, handlers and browser assistance
 
@@ -57,7 +67,7 @@ Current public release. This entry describes the accumulated feature set, not a 
 
 ## 1.0.0 — Initial public release preparation
 
-**Historical planning snapshot:** the version below was an earlier release-preparation draft, not an assertion of a published release. Its limitations are superseded where noted by released 1.0.63 and subsequent Unreleased entries above.
+**Historical planning snapshot:** the version below was an earlier release-preparation draft, not an assertion of a published release. Its limitations are superseded where noted by released 1.0.63 and the later release entry above.
 
 This draft packaged the existing development feature set under the planned 1.0.0 version name. This entry describes included capabilities; it is not a claim that every feature was added in this single release or tested on every website.
 

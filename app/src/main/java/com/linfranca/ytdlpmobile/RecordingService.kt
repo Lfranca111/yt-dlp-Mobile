@@ -39,19 +39,22 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
-class RecordingService : Service() {
+internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaTaskEngine(owner,taskId,false) {
     private val executor = Executors.newSingleThreadExecutor()
     private var processId: String? = null
     @Volatile private var pairedProcess: Process? = null
     @Volatile private var activeFinalizer: Process? = null
     @Volatile private var finalizationSkipRequested = false
     @Volatile private var liveRelay: LiveHlsRelay? = null
+    private var mouflonResolver: MouflonPlaylistResolver? = null
+    private var mouflonCapture = false
     private var lastSessionRefreshRequestAt = 0L
     private val pendingSafeEvents = ConcurrentLinkedQueue<String>()
     @Volatile private var saveWhenStopped = false
     @Volatile private var discardWhenStopped = false
     @Volatile private var stopWasRequested = false
     private var sessionDir: File? = null
+    private var storageWatch: StorageGuard.Watch? = null
     private var detailedLogFile: File? = null
     private var startedAt = 0L
     private var recordingWakeLock: PowerManager.WakeLock? = null
@@ -60,6 +63,10 @@ class RecordingService : Service() {
     private var pairedRecording = false
     private var timingSnapshot: LiveHlsRelay.AudioTimeline? = null
     private var timingOutcome = "original_no_timeline"
+    private var plannedAudioFilter: String? = null
+    private var capturedPacketTiming: TransportStreamTiming? = null
+    private var savedPacketTiming: TransportStreamTiming? = null
+    private var captureStoppedAt = 0L
     private var timingFailureReason = ""
     private var manualAudioDelayMs = 0
     @Volatile private var recordedMediaSeconds = 0L
@@ -67,6 +74,9 @@ class RecordingService : Service() {
     @Volatile private var outputStalledSince = 0L
     @Volatile private var stallWasDetected = false
     private var lastStallUserActionAt = 0L
+    @Volatile private var completionMonitor: LiveCompletionMonitor? = null
+    @Volatile private var directCaptureActive = false
+    private var confirmedCompletion = false
 
     override fun onCreate() {
         super.onCreate()
@@ -74,24 +84,43 @@ class RecordingService : Service() {
     }
 
     override fun onDestroy() {
-        getSystemService(NotificationManager::class.java).cancel(STALL_NOTIFICATION_ID)
+        executor.shutdown()
+        completionMonitor?.close();completionMonitor=null
+        getSystemService(NotificationManager::class.java).cancel(notificationId(STALL_NOTIFICATION_ID))
         recordingWakeLock?.let { lock -> if (lock.isHeld) lock.release() }
         recordingWakeLock = null
         super.onDestroy()
     }
 
+    override fun onTimeout(startId: Int,fgsType: Int) {
+        MonitoringStore.log(this,"media task timeout; task=$taskId; ${DeviceDiagnostics.snapshot(this)}")
+        stopRecording(save = true)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private var transferLease = ""
+    private var transferId = ""
+    private var transferStatus = "Interrupted before completion"
+    private var transferLog = ""
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if(intent?.action in setOf(ACTION_START, ACTION_BROWSER_START)) {
+            val id=intent?.getStringExtra(TransferQueue.JOB).orEmpty()
+            val lease=intent?.getStringExtra(TransferQueue.LEASE).orEmpty()
+            if(lease.isBlank() || !TransferQueue.owns(this,id,lease)) { stopSelfResult(startId);return START_NOT_STICKY }
+            transferId=id;transferLease=lease
+        }
         when (intent?.action) {
-            ACTION_START -> if (!DownloadState.running) startRecording(intent)
+            ACTION_START -> if (!taskState.running) startRecording(intent)
             ACTION_BROWSER_START -> startBrowserCapture()
             ACTION_BROWSER_FINISH -> finishBrowserCapture()
             ACTION_STOP_SAVE -> if (browserCapture) requestBrowserStop() else stopRecording(save = true)
             ACTION_CANCEL -> if (browserCapture) cancelBrowserCapture() else stopRecording(save = false)
             ACTION_RENEW_STREAM -> renewStream(intent)
             ACTION_BROWSER_EVENT -> recordBrowserEvent(intent)
-            ACTION_USER_INTERACTION -> if (DownloadState.running && !stopWasRequested &&
+            ACTION_USER_INTERACTION -> if (taskState.running && !stopWasRequested &&
                 outputStalledSince != 0L) {
                 lastStallUserActionAt = SystemClock.elapsedRealtime()
                 recordSafeEvent("stall_timeout_reset_by_user")
@@ -101,17 +130,19 @@ class RecordingService : Service() {
     }
 
     private var browserCapture = false
+    private var browserFinalizing = false
 
     private fun startBrowserCapture() {
-        if (DownloadState.running) return
+        if (taskState.running) return
         browserCapture = true
-        DownloadState.running = true
-        DownloadState.operation = DownloadState.OPERATION_RECORD
-        DownloadState.progress = 0
+        taskState.running = true
+        taskState.operation = taskState.OPERATION_RECORD
+        taskState.progress = 0
         recordedMediaSeconds = 0L
         mediaProgressSeen = false
-        DownloadState.log = "Capturing the video element and its available audio track…"
-        startForeground(NOTIFICATION_ID, notification("Recording browser video…"))
+        taskState.log = "Capturing the video element and its available audio track…"
+        startForeground(notificationId(NOTIFICATION_ID), notification("Recording browser video…"))
+        TransferQueue.started(this,transferId,transferLease)
         update("Recording browser video • use Stop & save when finished")
     }
 
@@ -121,26 +152,30 @@ class RecordingService : Service() {
     }
 
     private fun finishBrowserCapture() {
-        if (!browserCapture) return
+        if (!browserCapture || browserFinalizing) return
+        browserFinalizing=true
         val source = BrowserCaptureStore.take()
         executor.execute {
             try {
                 check(source != null && source.length() >= 1024L) { "No media data was recorded." }
                 exportBrowserWebm(source)
-                finish("Recording saved to Downloads/yt-dlp Mobile/Recordings", DownloadState.log)
+                finish("Recording saved to Downloads/yt-dlp Mobile/Recordings", taskState.log)
             } catch (error: Exception) {
-                finish("Recording could not be saved: ${error.message}", DownloadState.log + "\n" + error.message)
+                finish("Recording could not be saved: ${error.message}", taskState.log + "\n" + error.message)
             } finally {
-                source?.delete()
-                browserCapture = false
+                if(transferStatus.startsWith("Recording saved")) source?.delete()
+                browserCapture = false;browserFinalizing=false
+                TransferQueue.complete(this,transferId,transferStatus,transferLog,lease=transferLease)
             }
         }
     }
 
     private fun cancelBrowserCapture() {
+        if(browserFinalizing) { update("Browser recording is already being saved…");return }
         BrowserCaptureStore.discard()
         browserCapture = false
-        finish("Browser recording discarded", DownloadState.log)
+        finish("Browser recording discarded", taskState.log)
+        TransferQueue.complete(this,transferId,transferStatus,transferLog,lease=transferLease)
     }
 
     private fun exportBrowserWebm(source: File): Uri {
@@ -159,6 +194,7 @@ class RecordingService : Service() {
             }
             values.clear(); values.put(MediaStore.Downloads.IS_PENDING, 0)
             contentResolver.update(uri, values, null, null)
+            TransferQueue.exported(this, transferId, uri,transferLease)
             return uri
         } catch (error: Exception) {
             contentResolver.delete(uri, null, null)
@@ -170,26 +206,34 @@ class RecordingService : Service() {
         audioFinalizationCompleted = false
         audioFinalizationBypassed = false
         timingSnapshot = null
+        plannedAudioFilter = null
+        capturedPacketTiming = null
+        savedPacketTiming = null
+        captureStoppedAt = 0L
         timingOutcome = "original_no_timeline"
         timingFailureReason = "Live playlist relay did not provide a source timeline."
         finalizationSkipRequested = false
         saveWhenStopped = false
         discardWhenStopped = false
         stopWasRequested = false
-        DownloadState.recording403RecoveryAvailable = false
+        taskState.recording403RecoveryAvailable = false
         recordedMediaSeconds = 0L
         mediaProgressSeen = false
         outputStalledSince = 0L
         stallWasDetected = false
         lastStallUserActionAt = 0L
+        completionMonitor?.close();completionMonitor=null;confirmedCompletion=false;directCaptureActive=false
         liveRelay = null
+        mouflonResolver = null
+        mouflonCapture = false
         lastSessionRefreshRequestAt = 0L
         pendingSafeEvents.clear()
+        directDiagnosticKeys.clear()
         val url = intent.getStringExtra(EXTRA_URL).orEmpty()
         val audioUrl = intent.getStringExtra(EXTRA_AUDIO_URL).orEmpty()
-        DownloadState.recordingPageUrl = intent.getStringExtra(EXTRA_PAGE_URL).orEmpty()
-        DownloadState.recordingVideoUrl = url
-        DownloadState.recordingAudioUrl = audioUrl
+        taskState.recordingPageUrl = intent.getStringExtra(EXTRA_PAGE_URL).orEmpty()
+        taskState.recordingVideoUrl = url
+        taskState.recordingAudioUrl = audioUrl
         pairedRecording = audioUrl.isNotBlank()
         val audioDelayMs = intent.getIntExtra(EXTRA_AUDIO_DELAY_MS, 0).coerceIn(-10_000, 10_000)
         manualAudioDelayMs = audioDelayMs
@@ -199,21 +243,33 @@ class RecordingService : Service() {
         val userAgent = intent.getStringExtra(EXTRA_USER_AGENT).orEmpty()
         val headers = parseHeaders(intent.getStringExtra(EXTRA_HEADERS_JSON).orEmpty())
         val audioHeaders = parseHeaders(intent.getStringExtra(EXTRA_AUDIO_HEADERS_JSON).orEmpty())
+        val pageCookies = intent.getStringExtra(EXTRA_PAGE_COOKIES).orEmpty()
+        val pageUserAgent = intent.getStringExtra(EXTRA_PAGE_USER_AGENT).orEmpty()
+        val pageHeaders = WebpageAccessDiagnostic.pageHeaders(parseHeaders(intent.getStringExtra(EXTRA_PAGE_HEADERS_JSON).orEmpty()))
+        val pageObservation = intent.getStringExtra(EXTRA_PAGE_OBSERVATION).orEmpty()
+        var customExtractorAttempt = false
 
-        DownloadState.running = true
-        DownloadState.operation = DownloadState.OPERATION_RECORD
-        DownloadState.progress = 0
-        DownloadState.log = if (audioUrl.isBlank()) {
+        taskState.running = true
+        taskState.operation = taskState.OPERATION_RECORD
+        taskState.progress = 0
+        taskState.log = if (audioUrl.isBlank()) {
             "Starting direct stream recorder…"
         } else {
             "Starting paired video + audio stream recorder…\nChecking live stream timing." +
                 if (audioDelayMs != 0) "\nManual audio adjustment: " +
                     String.format(Locale.US, "%+.2f s", audioDelayMs / 1000.0) else ""
         }
+        taskState.log += "\nRecorder selection: " + if (audioUrl.isBlank())
+            "direct yt-dlp; reason=no separate audio URL supplied. Live following depends on extractor result."
+            else "paired FFmpeg; reason=separate audio URL supplied."
+        taskState.log += "\n" + StreamDeliveryDiagnostics.describeUrl(url)
+        taskState.log += "\n" + intent.getStringExtra(EXTRA_STREAM_DIAGNOSTICS).orEmpty().take(2000)
+        taskState.log += "\nSession access: cookies present=${cookies.isNotBlank()}, extra headers=${headers.size}; values omitted."
         startedAt = SystemClock.elapsedRealtime()
         detailedLogFile = null
         update("Recording stream • 0s • 0 B")
-        startForeground(NOTIFICATION_ID, notification("Recording stream…"))
+        startForeground(notificationId(NOTIFICATION_ID), notification("Recording stream…"))
+        TransferQueue.started(this,transferId,transferLease)
         // A foreground notification does not guarantee continuous CPU time
         // while the screen is off. Release this as soon as capture/export ends.
         recordingWakeLock = getSystemService(PowerManager::class.java)
@@ -221,25 +277,101 @@ class RecordingService : Service() {
             .also { it.acquire(4L * 60L * 60L * 1_000L) }
 
         executor.execute {
-            val folder = File(cacheDir, "recordings/${UUID.randomUUID()}").also {
+            val folder = File(TransferQueue.workDirectory(this,transferId,"recording"),UUID.randomUUID().toString()).also {
                 it.mkdirs()
                 sessionDir = it
+                storageWatch = StorageGuard.Watch(this,it)
             }
             val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
             // MPEG-TS remains readable if the live FFmpeg process is stopped mid-stream.
-            val output = File(folder, "recording-$stamp.ts")
+            var output = File(folder, "recording-$stamp.ts")
             try {
+                StorageGuard.working(this,phase="recording")
                 YoutubeDL.init(applicationContext)
                 FFmpeg.init(applicationContext)
+                completionMonitor = LiveCompletionMonitor(this, url, LiveHlsRelay.Access(userAgent,referer,cookies,headers),
+                    taskState.recordingPageUrl,pageUserAgent,pageCookies,::recordSafeEvent) { outputStalledSince!=0L }.also { it.start() }
                 if (saveWhenStopped || discardWhenStopped) error("Recording stopped before capture began.")
+                detailedLogFile = File(folder, "recording-$stamp-diagnostic-log.txt").also {
+                    it.writeText(taskState.log + "\n")
+                }
+                val installedVersion = runCatching {
+                    YoutubeDL.versionName(applicationContext) ?: YoutubeDL.version(applicationContext) ?: "unknown"
+                }.getOrDefault("unknown")
+                recordSafeEvent("Installed yt-dlp version: " + (RecorderErrorDiagnostic.safeLine(installedVersion) ?: "unknown"))
+                val hlsPlan = if (audioUrl.isBlank() && url.substringBefore('?').endsWith(".m3u8", true)) {
+                    LiveHlsRecordingPlan.inspect(url, LiveHlsRelay.Access(userAgent, referer, cookies, headers)) { event -> recordSafeEvent(event) }
+                } else null
+                hlsPlan?.let { recordSafeEvent(it.detail) }
+                if (saveWhenStopped || discardWhenStopped) error("Recording stopped during playlist inspection.")
                 if (audioUrl.isNotBlank()) {
                     // A single yt-dlp "best" HLS format may select just the video
                     // rendition. Give FFmpeg two inputs and map both tracks.
                     recordPairedStreams(url, audioUrl, output, referer, userAgent,
                         cookies, audioCookies.ifBlank { cookies }, headers, audioHeaders, audioDelayMs)
+                } else if (hlsPlan?.kind == LiveHlsRecordingPlan.Kind.LIVE) {
+                    val separate = hlsPlan.audio.isNotBlank()
+                    pairedRecording = separate
+                    taskState.recordingVideoUrl = hlsPlan.video
+                    taskState.recordingAudioUrl = hlsPlan.audio
+                    recordSafeEvent(if (separate) "hls_preflight_selected_paired_relay" else "hls_preflight_selected_combined_relay")
+                    recordPairedStreams(hlsPlan.video, hlsPlan.audio.ifBlank { hlsPlan.video },
+                        output, referer, userAgent, cookies, cookies, headers, headers,
+                        audioDelayMs, combinedInput = !separate)
+                } else if (hlsPlan?.kind == LiveHlsRecordingPlan.Kind.CUSTOM &&
+                    MouflonPlaylistResolver.compatibleMaster(url)) {
+                    customExtractorAttempt = true
+                    val knownPage = android.net.Uri.parse(taskState.recordingPageUrl).host.orEmpty().lowercase(Locale.ROOT) in
+                        setOf("stripchat.com", "www.stripchat.com", "xhamsterlive.com", "www.xhamsterlive.com")
+                    if (knownPage) verifyMouflonPublicSource(url, folder, pageUserAgent, pageCookies, pageHeaders)
+                    else {
+                        check(MouflonPlaylistResolver.observedMaster(url)) { "MOUFLON source was not observed in the browser. Play and detect again." }
+                        recordSafeEvent("mouflon_compatible_source; browser master observed; page public-state verification unavailable; mapping and media validation required")
+                    }
+                    if (saveWhenStopped || discardWhenStopped) error("Recording stopped during public source verification.")
+                    val access = LiveHlsRelay.Access(userAgent, referer, cookies, headers)
+                    val resolver = MouflonPlaylistResolver(url) { event -> recordSafeEvent(event) }
+                    mouflonResolver = resolver
+                    val deadline = SystemClock.elapsedRealtime() + 25_000L
+                    var selected: String? = null
+                    while (selected == null && SystemClock.elapsedRealtime() < deadline &&
+                        !saveWhenStopped && !discardWhenStopped) {
+                        try {
+                            val master = LiveHlsRecordingPlan.read(url, resolver.accessFor(java.net.URI(url), access)) { event -> recordSafeEvent(event) }
+                            val rendition = resolver.preferredRendition(url, master)
+                            val media = LiveHlsRecordingPlan.read(rendition, resolver.accessFor(java.net.URI(rendition), access)) { event -> recordSafeEvent(event) }
+                            val resolved = resolver.rewrite(java.net.URI(rendition), media)
+                            check(!resolved.contains("#EXT-X-ENDLIST") && resolved.contains("#EXTINF:")) {
+                                "The browser stream has ended or has no complete media segments."
+                            }
+                            selected = rendition
+                        } catch (_: MouflonPlaylistResolver.Pending) {
+                            Thread.sleep(500)
+                        }
+                    }
+                    if (saveWhenStopped || discardWhenStopped) error("Recording stopped during browser mapping verification.")
+                    val source = selected ?: error("No verified fresh MOUFLON mapping. Reopen Browser Assist, play the stream, and detect again.")
+                    taskState.recordingVideoUrl = source
+                    taskState.recordingAudioUrl = ""
+                    pairedRecording = false
+                    mouflonCapture = true
+                    // AV1 in MPEG-TS can become an unrecognized private-data track.
+                    // Fragmented MP4 preserves AV1/AAC and remains salvageable on stop.
+                    output = File(folder, "recording-$stamp.mp4")
+                    recordSafeEvent("mouflon_output_selected_fragmented_mp4; AV1/AAC retained without transcoding")
+                    recordSafeEvent("mouflon_verified_relay_selected; browser rendition retained; combined audio/video; source timestamps retained")
+                    recordPairedStreams(source, source, output, referer, userAgent,
+                        cookies, cookies, headers, headers, 0, combinedInput = true)
                 } else {
+                    pendingSafeEvents.clear()
+                    recordSafeEvent("direct_recorder_started")
                     processId = "record-${UUID.randomUUID()}"
-                    val request = YoutubeDLRequest(url)
+                    val customPlaylist = hlsPlan?.kind == LiveHlsRecordingPlan.Kind.CUSTOM
+                    val extractorUrl = if (customPlaylist) taskState.recordingPageUrl
+                        .takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                        ?: error("This custom playlist needs the original webpage. Reopen Browser Assist and detect again.")
+                        else url
+                    val request = YoutubeDLRequest(extractorUrl)
                         .addOption("--newline")
                         .addOption("--hls-use-mpegts")
                         .addOption("--no-part")
@@ -247,48 +379,131 @@ class RecordingService : Service() {
                         .addOption("--retries", 10)
                         .addOption("--fragment-retries", 10)
                         .addOption("-o", output.absolutePath)
-                    if (MediaUrlClassifier.isContinuousManifest(url)) request.addOption("--force-generic-extractor")
-                    if (referer.isNotBlank()) request.addOption("--referer", referer)
-                    if (userAgent.isNotBlank()) request.addOption("--user-agent", userAgent)
-                    val usableCookies = cookies.ifBlank { audioCookies }
-                    if (usableCookies.isNotBlank()) request.addOption("--add-headers", "Cookie:$usableCookies")
-                    (audioHeaders + headers).filterKeys { it.lowercase() !in setOf("cookie", "referer", "user-agent") }
-                        .forEach { (name, value) -> request.addOption("--add-headers", "$name:$value") }
+                    if (customPlaylist) {
+                        customExtractorAttempt = true
+                        val pageHost = android.net.Uri.parse(extractorUrl).host.orEmpty().lowercase(Locale.ROOT)
+                        if (pageHost in setOf("stripchat.com", "www.stripchat.com", "xhamsterlive.com", "www.xhamsterlive.com")) {
+                            val pluginRoot = File(folder, "extractor-compat")
+                            val plugin = File(pluginRoot, "mobile-public-state/yt_dlp_plugins/extractor/mobile_public_stream.py")
+                            plugin.parentFile?.mkdirs()
+                            assets.open("yt_dlp_plugins/extractor/mobile_public_stream.py").use { input ->
+                                plugin.outputStream().use { input.copyTo(it) }
+                            }
+                            val encodedMaster = android.util.Base64.encodeToString(url.toByteArray(Charsets.UTF_8),
+                                android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
+                            request.addOption("--plugin-dirs", pluginRoot.absolutePath)
+                            request.addOption("--extractor-args", "stripchat:browser_master=$encodedMaster")
+                            request.addOption("--socket-timeout", 10)
+                            recordSafeEvent("public_state_compatibility_requested; page host=$pageHost; revision=1; plugin selection will be confirmed by extractor output")
+                        }
+                        request.addOption("--downloader", "ffmpeg")
+                        recordSafeEvent("custom_playlist_site_extractor_attempt; FFmpeg live following requested; support depends on installed yt-dlp extractor")
+                        taskState.log += "\nTrying the original webpage extractor for this custom stream. Support is not yet guaranteed."
+                    } else if (MediaUrlClassifier.isContinuousManifest(url)) request.addOption("--force-generic-extractor")
+                    if (customPlaylist) {
+                        recordSafeEvent("custom_page_attempt=1; request context=webpage; media headers excluded; header names=" + pageHeaders.keys.joinToString(", ") + ", User-Agent")
+                        recordSafeEvent("media request context excluded from page; header names=" + headers.keys.sorted().joinToString(", ") + "; media cookies present=${cookies.isNotBlank()}; audio cookies present=${audioCookies.isNotBlank()}")
+                        recordSafeEvent("page cookie source=WebView lookup for original page URL; values omitted; original cookie attributes unavailable; exporting host-only session cookies; present=${pageCookies.isNotBlank()}")
+                        recordSafeEvent("Browser comparison: " + (RecorderErrorDiagnostic.safeLine(pageObservation) ?: "no page observation available"))
+                        if (pageUserAgent.isNotBlank()) request.addOption("--user-agent", pageUserAgent)
+                        pageHeaders.forEach { (name, value) -> request.addOption("--add-headers", "$name:$value") }
+                        if (pageCookies.isNotBlank()) {
+                            val pageCookieFile = File(folder, "page-access-cookies.txt")
+                            pageCookieFile.writeText(WebpageAccessDiagnostic.cookieFile(extractorUrl, pageCookies))
+                            request.addOption("--cookies", pageCookieFile.absolutePath)
+                        }
+                        recordSafeEvent("custom_page_retry_policy; yt-dlp retries=10, fragment retries=10; application does not silently repeat page extraction; extractor retry messages logged when available")
+                    } else {
+                        if (referer.isNotBlank()) request.addOption("--referer", referer)
+                        if (userAgent.isNotBlank()) request.addOption("--user-agent", userAgent)
+                        val usableCookies = cookies.ifBlank { audioCookies }
+                        if (usableCookies.isNotBlank()) request.addOption("--add-headers", "Cookie:$usableCookies")
+                        (audioHeaders + headers).filterKeys { it.lowercase() !in setOf("cookie", "referer", "user-agent") }
+                            .forEach { (name, value) -> request.addOption("--add-headers", "$name:$value") }
+                    }
 
                     if (saveWhenStopped || discardWhenStopped) error("Recording stopped before capture began.")
+                    directCaptureActive = true
+                    watchDirectCompletion(output)
                     YoutubeDL.execute(request, processId, true) { _, _, line ->
-                        if (line.isNotBlank()) DownloadState.log = (DownloadState.log + "\n" + line).takeLast(MAX_LOG_CHARS)
+                        if (customPlaylist && line.contains("App compatibility:")) {
+                            RecorderErrorDiagnostic.safeLine(line)?.let { recordSafeEvent("Compatibility observation: $it") }
+                        }
+                        if (customPlaylist && (line.contains("Extracting URL:") || line.contains("Retrying") || line.contains("retry", true))) {
+                            RecorderErrorDiagnostic.safeLine(line)?.let { recordSafeEvent("Extractor observation: $it") }
+                        }
+                        if (line.trimStart().startsWith("ERROR:")) {
+                            RecorderErrorDiagnostic.safeLine(line)?.let { detail ->
+                                recordDirectDiagnosticOnce("extractor_error", "Extractor failure: $detail")
+                            }
+                        }
+                        if (line.contains("[ffmpeg]")) recordDirectDiagnosticOnce("engine_ffmpeg", "Direct engine: FFmpeg selected by yt-dlp.")
+                        if (line.contains("[hlsnative]")) recordDirectDiagnosticOnce("engine_hlsnative", "Direct engine: hlsnative selected by yt-dlp.")
+                        if (line.contains("Total fragments:")) recordSafeEvent("Extractor fragment report: " + line.substringAfter("Total fragments:").trim().take(32))
+                        if (line.isNotBlank()) taskState.log = (taskState.log + "\n" + line).takeLast(MAX_LOG_CHARS)
                         update(recordingStatus(folder))
                     }
                 }
-                saveWhenStopped = true // A finite stream ended normally.
+                if (customExtractorAttempt) recordSafeEvent("custom_page_attempt=1 completed; user stop=$stopWasRequested; bytes=${output.length()}; return does not prove stream ended")
+                recordSafeEvent(if (confirmedCompletion || completionMonitor?.reason!=null || liveRelay?.sourceEnded()==true)
+                    "recorder_saved_after_confirmed_completion" else if (stopWasRequested) "recorder_exit_after_stop_request" else
+                    "recorder_returned_without_user_stop_stream_end_unconfirmed")
+                saveWhenStopped = true // Preserve existing save behavior; return alone is not proof of ENDLIST.
             } catch (error: Exception) {
+                recordSafeEvent("Recorder exception: type=${error.javaClass.simpleName}; user stop=$stopWasRequested; discard=$discardWhenStopped")
+                RecorderErrorDiagnostic.describe(error).forEach(::recordSafeEvent)
+                if (customExtractorAttempt) {
+                    recordSafeEvent("custom_page_attempt=1 failed; bytes=${output.length()}; request change=page access separated from CDN access")
+                    if (!stopWasRequested && !discardWhenStopped) {
+                        WebpageAccessDiagnostic.probe(taskState.recordingPageUrl, pageUserAgent, pageCookies, pageHeaders, ::recordSafeEvent)
+                    } else recordSafeEvent("page_probe_skipped; user stopped recording")
+                }
                 if (!saveWhenStopped && !discardWhenStopped) {
-                    DownloadState.log = (DownloadState.log + "\n" + error.message.orEmpty()).takeLast(MAX_LOG_CHARS)
+                    taskState.log = (taskState.log + "\n" + error.message.orEmpty()).takeLast(MAX_LOG_CHARS)
                 }
             } finally {
+                directCaptureActive=false
+                completionMonitor?.close();completionMonitor=null
+                File(folder, "page-access-cookies.txt").delete()
+                if (mouflonCapture && !discardWhenStopped && output.isFile && output.length() > 0L) {
+                    runCatching { FragmentedMp4Recovery.trimIncompleteTail(output) }
+                        .onSuccess { recordSafeEvent("mouflon_mp4_finalization; complete fragments retained; incomplete/trailing bytes removed=$it") }
+                        .onFailure { recordSafeEvent("mouflon_mp4_finalization_failed; error type=${it.javaClass.simpleName}") }
+                }
+                mouflonResolver = null
                 processId = null
                 pairedProcess = null
-                val elapsed = (SystemClock.elapsedRealtime() - startedAt) / 1_000L
+                if (captureStoppedAt == 0L) captureStoppedAt = SystemClock.elapsedRealtime()
+                val elapsed = (captureStoppedAt - startedAt).coerceAtLeast(0L) / 1_000L
+                savedPacketTiming = TransportStreamTiming.inspect(output)
+                val savedSpan = savedPacketTiming?.video?.spanSeconds()
+                val durationNote = if (savedSpan != null) "\nSaved video packet span: ${String.format(Locale.ROOT, "%.3f", savedSpan)}s (timestamp estimate; excludes final frame duration)." else ""
                 val timing = if (mediaProgressSeen) {
                     "\nCapture timing: ${recordedMediaSeconds}s media over ${elapsed}s elapsed."
                 } else "\nCapture timing: ${elapsed}s elapsed; native media progress unavailable."
-                DownloadState.log = (DownloadState.log + timing).takeLast(MAX_LOG_CHARS)
+                taskState.log = (taskState.log + timing + durationNote).takeLast(MAX_LOG_CHARS)
+                if (audioUrl.isBlank()) recordSafeEvent("Final capture: elapsed=${elapsed}s; bytes=${output.length()}; native media progress=$mediaProgressSeen")
                 detailedLogFile?.takeIf { it.isFile && it.length() > 0 }?.let { logFile ->
                     runCatching { exportDiagnosticLog(logFile) }
-                        .onSuccess { DownloadState.log = (DownloadState.log +
-                            "\nFull HTTP event log saved to Downloads/yt-dlp Mobile/Recordings/${logFile.name}.")
+                        .onSuccess { taskState.log = (taskState.log +
+                            "\n" + (if (audioUrl.isBlank()) "Recorder diagnostic log" else "Full HTTP event log") +
+                            " saved to Downloads/yt-dlp Mobile/Recordings/${logFile.name}.")
                             .takeLast(MAX_LOG_CHARS) }
-                        .onFailure { DownloadState.log = (DownloadState.log +
+                        .onFailure { taskState.log = (taskState.log +
                             "\nCould not export HTTP event log: ${it.message}").takeLast(MAX_LOG_CHARS) }
                 }
                 detailedLogFile = null
-                val source = RecordingMedia.choose(folder, stopWasRequested)
+                val source = RecordingMedia.choose(folder, stopWasRequested, allowFragmentedMp4 = mouflonCapture)
                 when {
-                    discardWhenStopped -> finish("Recording discarded", DownloadState.log)
+                    discardWhenStopped -> finish("Recording discarded", taskState.log)
                     saveWhenStopped && source != null -> {
                         val audioPresent = recordedAudioPresent(source.file)
-                        runCatching { export(source) }
+                        val truncatedTs = stopWasRequested && source.extension == "ts" && source.file.length() % 188L != 0L
+                        val tail = if (truncatedTs) runCatching { RecordingTsTail.plan(source.file) }.getOrNull() else null
+                        if (truncatedTs) recordSafeEvent(if (tail != null)
+                            "Interrupted TS export: omitting ${tail.sourceBytes - tail.exportBytes()} bytes from incomplete trailing media."
+                        else "Interrupted TS has an unaligned tail; a conservative repair could not be verified.")
+                        runCatching { export(source, tail) }
                             .onSuccess {
                                 val partial = mediaProgressSeen && elapsed > 30L &&
                                     recordedMediaSeconds + 10L < elapsed / 2L
@@ -306,47 +521,100 @@ class RecordingService : Service() {
                                         report.writeText(timingReport(source.file, elapsed).toString(2))
                                         exportDiagnosticLog(report)
                                     }.onSuccess {
-                                        DownloadState.log = (DownloadState.log +
+                                        taskState.log = (taskState.log +
                                             "\nTiming report saved to Downloads/yt-dlp Mobile/Recordings/${report.name}" +
                                             " (video gaps=${timingSnapshot?.videoGaps?.size ?: 0}, " +
                                             "audio gaps=${timingSnapshot?.audioGaps?.size ?: 0}, " +
                                             "clock jumps=${(timingSnapshot?.videoClockJumps?.size ?: 0) + (timingSnapshot?.audioClockJumps?.size ?: 0)}).")
                                             .takeLast(MAX_LOG_CHARS)
                                     }.onFailure { error ->
-                                        DownloadState.log = (DownloadState.log +
+                                        taskState.log = (taskState.log +
                                             "\nCould not save timing report: ${FfmpegDiagnostic.safeLine(error.message.orEmpty()) ?: error.javaClass.simpleName}")
                                             .takeLast(MAX_LOG_CHARS)
                                     }
                                 }
-                                finish(status + if (audioFinalizationBypassed) " • audio alignment incomplete" else "",
-                                    DownloadState.log + "\nSaved ${source.extension} recording; " +
+                                val tailWarning = if (truncatedTs && tail == null) " • recording end may be incomplete" else ""
+                                finish(status + (if (audioFinalizationBypassed) " • audio alignment incomplete" else "") + tailWarning,
+                                    taskState.log + "\nSaved ${source.extension} recording; " +
                                     when (audioPresent) {
                                         true -> "audio track detected"
                                         false -> "no audio track detected"
                                         null -> "audio could not be verified"
                                     })
                             }
-                            .onFailure { finish("Could not save recording: ${it.message}", DownloadState.log + "\n" + it.message) }
+                            .onFailure { finish("Could not save recording: ${it.message}", taskState.log + "\n" + it.message) }
                     }
                     else -> {
                         val files = folder.walkTopDown().filter(File::isFile)
                             .joinToString { "${it.name} (${it.length()} bytes)" }
-                        finish(recordingFailureStatus(DownloadState.log),
-                            DownloadState.log + "\nRecorder files after stop: " + files)
+                        finish(recordingFailureStatus(taskState.log),
+                            taskState.log + "\nRecorder files after stop: " + files)
                     }
                 }
-                folder.deleteRecursively()
+                if(discardWhenStopped || transferStatus.startsWith("Recording saved") || transferStatus.startsWith("Partial recording saved")) folder.deleteRecursively()
+                else recordSafeEvent("Capture retained in private recovery storage; use Save recovered recording in Queue & history")
+                storageWatch=null
                 sessionDir = null
                 recordingWakeLock?.let { lock -> if (lock.isHeld) lock.release() }
                 recordingWakeLock = null
+                TransferQueue.complete(this,transferId,transferStatus,transferLog,lease=transferLease)
             }
+        }
+    }
+
+    private fun verifyMouflonPublicSource(master: String, folder: File, pageAgent: String,
+                                         pageCookie: String, pageHeaders: Map<String, String>) {
+        val pluginRoot = File(folder, "extractor-compat")
+        val plugin = File(pluginRoot, "mobile-public-state/yt_dlp_plugins/extractor/mobile_public_stream.py")
+        plugin.parentFile?.mkdirs()
+        assets.open("yt_dlp_plugins/extractor/mobile_public_stream.py").use { input ->
+            plugin.outputStream().use { input.copyTo(it) }
+        }
+        val encoded = android.util.Base64.encodeToString(master.toByteArray(Charsets.UTF_8),
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
+        val page = taskState.recordingPageUrl
+        val request = YoutubeDLRequest(page)
+            .addOption("--plugin-dirs", pluginRoot.absolutePath)
+            .addOption("--extractor-args", "stripchat:browser_master=$encoded;public_probe=true")
+            .addOption("--skip-download").addOption("--no-check-formats")
+            .addOption("--no-playlist").addOption("--socket-timeout", 10)
+            .addOption("--retries", 2).addOption("--newline")
+        if (pageAgent.isNotBlank()) request.addOption("--user-agent", pageAgent)
+        pageHeaders.forEach { (name, value) -> request.addOption("--add-headers", "$name:$value") }
+        if (pageCookie.isNotBlank()) {
+            val jar = File(folder, "page-access-cookies.txt")
+            jar.writeText(WebpageAccessDiagnostic.cookieFile(page, pageCookie))
+            request.addOption("--cookies", jar.absolutePath)
+        }
+        recordSafeEvent("mouflon_public_source_probe_started; revision=2; page request context; media headers excluded; page cookies present=${pageCookie.isNotBlank()}; header names=" + pageHeaders.keys.joinToString(","))
+        processId = "public-probe-${UUID.randomUUID()}"
+        var confirmed = false
+        try {
+            YoutubeDL.execute(request, processId, true) { _, _, line ->
+                if (line.contains("App compatibility:") || line.contains("Extracting URL:") ||
+                    line.contains("Retrying") || line.trimStart().startsWith("ERROR:")) {
+                    RecorderErrorDiagnostic.safeLine(line)?.let { recordSafeEvent("mouflon_probe: $it") }
+                }
+                if (line.contains("App compatibility: public source verified; returning identity probe only")) confirmed = true
+            }
+            check(confirmed) { "The public-stream adapter was not selected or did not verify this room. No recording was started." }
+            recordSafeEvent("mouflon_public_source_probe_completed; public room and browser stream identity verified")
+        } catch (error: Exception) {
+            RecorderErrorDiagnostic.describe(error).forEach { detail ->
+                recordSafeEvent("mouflon_public_source_probe_failed: $detail")
+            }
+            throw error
+        } finally {
+            processId = null
+            File(folder, "page-access-cookies.txt").delete()
         }
     }
 
     private fun recordPairedStreams(video: String, audio: String, output: File, referer: String,
                                     userAgent: String, videoCookie: String, audioCookie: String,
                                     videoHeaders: Map<String, String>, audioHeaders: Map<String, String>,
-                                    audioDelayMs: Int, forceSeparateInputs: Boolean = false) {
+                                    audioDelayMs: Int, forceSeparateInputs: Boolean = false,
+                                    combinedInput: Boolean = false) {
         val packages = sequenceOf(filesDir, noBackupFilesDir).flatMap { root ->
             sequenceOf("arm64", "arm", "x86_64", "x86", "arm64-v8a", "armeabi-v7a")
                 .map { arch -> File(root, "youtubedl-android/packages/$arch/usr/bin/ffmpeg") }
@@ -432,7 +700,7 @@ class RecordingService : Service() {
             (host == "mmcdn.com" || host.endsWith(".mmcdn.com")) &&
                 url.substringBefore('?').contains("_llhls.m3u8", ignoreCase = true)
         }
-        val useHlsMaster = isHlsPair && sameRequest && audioDelayMs == 0 &&
+        val useHlsMaster = !combinedInput && isHlsPair && sameRequest && audioDelayMs == 0 &&
             !forceSeparateInputs && !unstableLowLatencyHls
         // Verbose HLS events are reduced to counts below. Never retain signed URLs.
         val options = mutableListOf("-nostdin", "-hide_banner", "-loglevel", "verbose",
@@ -444,12 +712,12 @@ class RecordingService : Service() {
             // -copyts disables FFmpeg's HLS discontinuity correction. Keep it
             // off for these streams, and repair jumps beyond two seconds.
             options.addAll(listOf("-dts_delta_threshold", "2"))
-            DownloadState.log = (DownloadState.log +
+            taskState.log = (taskState.log +
                 "\nUsing discontinuity correction for unstable live timestamps.")
                 .takeLast(MAX_LOG_CHARS)
         }
         if (unstableLowLatencyHls) {
-            DownloadState.log = (DownloadState.log +
+            taskState.log = (taskState.log +
                 "\nUsing persistent and overlapping HTTP segment requests for low-latency HLS.")
                 .takeLast(MAX_LOG_CHARS)
         }
@@ -479,29 +747,42 @@ class RecordingService : Service() {
         // playlists retain the existing FFmpeg fallback.
         val relayLog = File(output.parentFile, output.nameWithoutExtension + "-http-log.txt")
         val relay = if (tryLiveHlsRelay) runCatching {
-            LiveHlsRelay(video, audio,
+            if (combinedInput && mouflonResolver != null) LiveHlsRelay(video,
+                LiveHlsRelay.Access(userAgent, referer, videoCookie, videoHeaders), relayLog, mouflonResolver!!)
+            else if (combinedInput) LiveHlsRelay(video,
+                LiveHlsRelay.Access(userAgent, referer, videoCookie, videoHeaders), relayLog)
+            else LiveHlsRelay(video, audio,
                 LiveHlsRelay.Access(userAgent, referer, videoCookie, videoHeaders),
                 LiveHlsRelay.Access(userAgent, referer, audioCookie, audioHeaders), relayLog)
         }.onFailure { error ->
             if (relayLog.isFile && relayLog.length() > 0) detailedLogFile = relayLog
             val cause = error.message?.takeIf { it.startsWith("Live stream could not start:") }
                 ?: "initial fetch failed"
-            DownloadState.log = (DownloadState.log + "\nLive playlist relay unavailable: " +
-                cause + "; using direct recorder.")
+            taskState.log = (taskState.log + "\nLive playlist relay unavailable: " +
+                cause + (if (combinedInput) "; capture was not started." else "; using direct recorder."))
                 .takeLast(MAX_LOG_CHARS)
         }.getOrNull() else null
+        if (combinedInput && relay == null) error("Live HLS segment verification failed; check the saved diagnostic log. No finite-download fallback was started.")
+        recordSafeEvent("Paired input selection: HLS pair=$isHlsPair; relay enabled=${relay != null}; shared input requested=$useHlsMaster; separate inputs forced=$forceSeparateInputs")
         if (relay != null) {
             liveRelay = relay
             while (true) {
                 val pending = pendingSafeEvents.poll() ?: break
                 relay.logDiagnosticEvent(pending)
             }
+            val initialDiagnostic = detailedLogFile
+            if (initialDiagnostic != null && initialDiagnostic != relayLog && initialDiagnostic.isFile) {
+                if (mouflonResolver != null) initialDiagnostic.forEachLine { line ->
+                    RecorderErrorDiagnostic.safeLine(line)?.let { relay.logDiagnosticEvent("preflight $it") }
+                } else initialDiagnostic.readLines().filter { it.startsWith("+") }.takeLast(100)
+                    .forEach { relay.logDiagnosticEvent("preflight " + it) }
+            }
             detailedLogFile = relayLog
-            DownloadState.log = (DownloadState.log +
+            taskState.log = (taskState.log +
                 "\nFollowing live audio and video segments with verified HTTP responses.")
                 .takeLast(MAX_LOG_CHARS)
         }
-        val measuredOffset = relay?.initialAudioOffsetSeconds()?.takeIf {
+        val measuredOffset = (if (combinedInput) null else relay?.initialAudioOffsetSeconds())?.takeIf {
             kotlin.math.abs(it) <= 30.0
         }
         if (relay != null) {
@@ -509,7 +790,7 @@ class RecordingService : Service() {
                 "\nLive audio start offset from playlist time: " +
                     String.format(Locale.US, "%+.3f s", measuredOffset) + "."
             } else "\nLive playlist wall-clock time unavailable; preserving source packet timing."
-            DownloadState.log = (DownloadState.log + alignment).takeLast(MAX_LOG_CHARS)
+            taskState.log = (taskState.log + alignment).takeLast(MAX_LOG_CHARS)
         }
         if (saveWhenStopped || discardWhenStopped) {
             relay?.close()
@@ -518,7 +799,7 @@ class RecordingService : Service() {
         // The relay preserves the original CMAF packet timestamps. Feed both
         // renditions through one HLS demuxer so FFmpeg cannot rebase the two
         // input clocks independently (which loses their actual separation).
-        val useRelayMaster = relay != null && audioDelayMs == 0 && !forceSeparateInputs
+        val useRelayMaster = !combinedInput && relay != null && audioDelayMs == 0 && !forceSeparateInputs
         val useSharedMaster = useHlsMaster || useRelayMaster
         val playlistServer = if (useSharedMaster) {
             PairedPlaylistServer(PairedHlsMaster.build(
@@ -526,7 +807,12 @@ class RecordingService : Service() {
         } else null
         try {
             var firstMediaProgressUs = -1L
-            if (useSharedMaster) {
+            if (combinedInput) {
+                input(relay!!.videoUrl(), "", emptyMap())
+                options.addAll(listOf("-map", "0:v:0", "-map", "0:a:0?"))
+                recordSafeEvent("combined_hls_single_demuxer; original packet timing retained; no independent audio alignment")
+                taskState.log += "\nFollowing combined live audio/video on one source timeline."
+            } else if (useSharedMaster) {
                 // A single HLS demuxer follows both renditions on one media timeline.
                 // Serve the temporary master over HTTP so FFmpeg propagates cookies,
                 // user agent and referer to both remote playlists and their segments.
@@ -534,7 +820,7 @@ class RecordingService : Service() {
                     if (useRelayMaster) "" else videoCookie,
                     if (useRelayMaster) emptyMap() else videoHeaders.ifEmpty { audioHeaders })
                 options.addAll(listOf("-map", "0:v:0", "-map", "0:a:0"))
-                DownloadState.log = (DownloadState.log +
+                taskState.log = (taskState.log +
                     "\nUsing a shared HLS input to preserve the source audio/video timeline.")
                     .takeLast(MAX_LOG_CHARS)
             } else {
@@ -553,7 +839,9 @@ class RecordingService : Service() {
                     if (relay == null) audioHeaders else emptyMap())
                 options.addAll(listOf("-map", "0:v:0", "-map", "1:a:0"))
             }
-            options.addAll(listOf("-c", "copy", "-f", "mpegts", output.absolutePath))
+            if (mouflonResolver != null) options.addAll(listOf("-c", "copy", "-movflags",
+                "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", output.absolutePath))
+            else options.addAll(listOf("-c", "copy", "-f", "mpegts", output.absolutePath))
             val command = mutableListOf(binary.absolutePath).apply { addAll(options) }
             val builder = ProcessBuilder(command).also(::configure)
             val process = builder.start()
@@ -584,12 +872,24 @@ class RecordingService : Service() {
                         val noMediaProgress = mediaProgressSeen && lastBytes > 0L &&
                             now - lastMediaAt >= STALL_WARNING_MS
                         val stalled = !stopWasRequested && (noFileProgress || noMediaProgress)
-                        if (!stopWasRequested && relay?.hasRecentHttp403() == true &&
+                        val relayEnded=relay?.sourceEnded()==true
+                        if(!stopWasRequested && ((relayEnded && relay?.finalSegmentsServed()==true &&
+                            now-maxOf(lastGrowthAt,lastMediaAt)>=10_000L) ||
+                            (LiveEndEvidence.independentCompletionApplies(completionMonitor?.reason,relay!=null) && stalled))) {
+                            confirmedCompletion=true
+                            recordSafeEvent("stream_end_drain_finished; evidence="+(if(relayEnded) "all active HLS tracks ENDLIST; final segments served" else completionMonitor?.reason))
+                            stopRecording(save=true);return
+                        }
+                        if (!stopWasRequested && (relay?.hasRecentHttp403() == true ||
+                            relay?.waitingForMouflonMapping() == true) &&
                             now - lastGrowthAt >= 10_000L &&
                             (lastSessionRefreshRequestAt == 0L ||
                                 now - lastSessionRefreshRequestAt >= 60_000L)) {
                             lastSessionRefreshRequestAt = now
                             recordSafeEvent("recorder_requests_browser_session_refresh")
+                            if (relay?.waitingForMouflonMapping() == true) {
+                                recordSafeEvent("mouflon_recovery_attempt; fresh browser detection requested; existing recording preserved")
+                            }
                             sendBroadcast(Intent(ACTION_BROWSER_REFRESH_REQUEST).setPackage(packageName))
                         }
                         if (stalled && outputStalledSince == 0L) {
@@ -598,8 +898,8 @@ class RecordingService : Service() {
                             stallWasDetected = true
                             recordSafeEvent("stall_five_minute_auto_save_timer_started")
                             if (relay?.hasRecentHttp403() == true &&
-                                DownloadState.recordingPageUrl.isNotBlank()) {
-                                DownloadState.recording403RecoveryAvailable = true
+                                taskState.recordingPageUrl.isNotBlank()) {
+                                taskState.recording403RecoveryAvailable = true
                                 recordSafeEvent("manual_403_recovery_available")
                             }
                             val warning = when {
@@ -623,7 +923,7 @@ class RecordingService : Service() {
                                 recordingEnvironmentSnapshot(now) + "\n" + trace.summary(now) + "\n" +
                                 (relay?.stallSnapshot() ?: "Live relay inactive; direct FFmpeg requests show attempts, not confirmed HTTP responses.") +
                                 "\nThis snapshot records observations; it cannot prove why the browser or server stopped sending data."
-                            DownloadState.log = (DownloadState.log + "\n" + warning + "\n" + snapshot)
+                            taskState.log = (taskState.log + "\n" + warning + "\n" + snapshot)
                                 .takeLast(MAX_LOG_CHARS)
                             relay?.logDiagnosticEvent(warning)
                             snapshot.lineSequence().forEach { line ->
@@ -631,22 +931,22 @@ class RecordingService : Service() {
                             }
                             showStallNotification(warning)
                         } else if (!stopWasRequested && stalled && relay?.hasRecentHttp403() == true &&
-                            !DownloadState.recording403RecoveryAvailable &&
-                            DownloadState.recordingPageUrl.isNotBlank()) {
-                            DownloadState.recording403RecoveryAvailable = true
+                            !taskState.recording403RecoveryAvailable &&
+                            taskState.recordingPageUrl.isNotBlank()) {
+                            taskState.recording403RecoveryAvailable = true
                             recordSafeEvent("manual_403_recovery_available_after_stall")
                             val warning = "Stream server returned 403. Automatic refresh continues. Reopen stalled stream or tap Stop & save. It will stop and save after 5 minutes without user activity."
-                            DownloadState.log = (DownloadState.log + "\n" + warning).takeLast(MAX_LOG_CHARS)
+                            taskState.log = (taskState.log + "\n" + warning).takeLast(MAX_LOG_CHARS)
                             showStallNotification(warning)
                         } else if (!stopWasRequested && !stalled && outputStalledSince != 0L) {
                             outputStalledSince = 0L
                             lastStallUserActionAt = 0L
-                            if (DownloadState.recording403RecoveryAvailable) {
-                                DownloadState.recording403RecoveryAvailable = false
+                            if (taskState.recording403RecoveryAvailable) {
+                                taskState.recording403RecoveryAvailable = false
                                 recordSafeEvent("manual_403_recovery_cleared_after_resume")
                             }
-                            getSystemService(NotificationManager::class.java).cancel(STALL_NOTIFICATION_ID)
-                            DownloadState.log = (DownloadState.log +
+                            getSystemService(NotificationManager::class.java).cancel(notificationId(STALL_NOTIFICATION_ID))
+                            taskState.log = (taskState.log +
                                 "\nRecording output resumed after a stall.").takeLast(MAX_LOG_CHARS)
                             relay?.logDiagnosticEvent("recording output resumed after stall; " +
                                 "media=${recordedMediaSeconds}s, output=${humanBytes(bytes)}")
@@ -657,7 +957,7 @@ class RecordingService : Service() {
                                 "Stopping and saving automatically; captured media=${recordedMediaSeconds}s, " +
                                 "output=${humanBytes(bytes)}."
                             recordSafeEvent("stall_timeout_auto_stop_and_save")
-                            DownloadState.log = (DownloadState.log + "\n" + detail).takeLast(MAX_LOG_CHARS)
+                            taskState.log = (taskState.log + "\n" + detail).takeLast(MAX_LOG_CHARS)
                             relay?.logDiagnosticEvent(detail)
                             stopRecording(save = true)
                             return
@@ -671,6 +971,7 @@ class RecordingService : Service() {
             // The verbose output can contain signed URLs, cookies and headers.
             // Only retain counts and fixed issue labels, never raw lines.
             var readFailure: IOException? = null
+            var lastMouflonProgress = -5L
             try {
                 BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                     reader.forEachLine { line ->
@@ -688,12 +989,22 @@ class RecordingService : Service() {
                                 recordedMediaSeconds = outputUs / 1_000_000L
                                 mediaProgressSeen = true
                                 trace.observeMedia(timeUs, SystemClock.elapsedRealtime())
+                                if (mouflonResolver != null && recordedMediaSeconds >= lastMouflonProgress + 5L) {
+                                    lastMouflonProgress = recordedMediaSeconds
+                                    relay?.logDiagnosticEvent("mouflon_media_progress; media=${recordedMediaSeconds}s; output bytes=${output.length()}")
+                                }
                             }
                             update(recordingStatus(output.parentFile!!))
                         } else if (line.startsWith("frame=") || line.startsWith("size=")) {
                             update(recordingStatus(output.parentFile!!))
                         } else if (line.isNotBlank()) {
                             trace.observeLog(line)
+                            if (mouflonResolver != null && listOf("error", "invalid", "failed", "unsupported")
+                                    .any { line.contains(it, ignoreCase = true) }) {
+                                RecorderErrorDiagnostic.safeLine(line)?.let {
+                                    relay?.logDiagnosticEvent("mouflon_ffmpeg_diagnostic: $it")
+                                }
+                            }
                         }
                     }
                 }
@@ -703,13 +1014,24 @@ class RecordingService : Service() {
                 if (!stopWasRequested) readFailure = error
             } finally {
                 trace.observeBytes(output.length(), SystemClock.elapsedRealtime())
-                DownloadState.log = (DownloadState.log + "\n" +
+                taskState.log = (taskState.log + "\n" +
                     trace.summary(SystemClock.elapsedRealtime())).takeLast(MAX_LOG_CHARS)
             }
             val exit = process.waitFor()
+            if(relay?.sourceEnded()==true) {
+                confirmedCompletion=true
+                recordSafeEvent("stream_end_confirmed; all active HLS tracks ENDLIST; recorder finished draining")
+            }
+            relay?.stopFetching()
+            captureStoppedAt = SystemClock.elapsedRealtime()
+            capturedPacketTiming = TransportStreamTiming.inspect(output)
+            capturedPacketTiming?.let { packets ->
+                relay?.logDiagnosticEvent("captured packet bounds: video first=${packets.video.firstSeconds()} last=${packets.video.lastSeconds()}; audio first=${packets.audio.firstSeconds()} last=${packets.audio.lastSeconds()}; sampling bytes=${packets.bytesScanned}")
+            }
+            recordSafeEvent("FFmpeg exit=$exit; user stop=$stopWasRequested; media=${recordedMediaSeconds}s; bytes=${output.length()}")
             relay?.logDiagnosticEvent("recorder exit=$exit; stop requested=$stopWasRequested; " +
                 "media=${recordedMediaSeconds}s, output=${humanBytes(output.length())}")
-            if (relay != null) {
+            if (relay != null && !combinedInput) {
                 timingSnapshot = relay.audioTimeline()
                 timingOutcome = when {
                     audioDelayMs != 0 -> "captured_with_manual_audio_offset"
@@ -720,13 +1042,13 @@ class RecordingService : Service() {
             }
             if (readFailure != null) throw readFailure
             if (!stopWasRequested && exit != 0) {
-                DownloadState.log = (DownloadState.log +
+                taskState.log = (taskState.log +
                     "\nFFmpeg exited with code $exit.").takeLast(MAX_LOG_CHARS)
                 if (useSharedMaster && !saveWhenStopped && !discardWhenStopped) {
                     output.delete()
                     recordedMediaSeconds = 0L
                     mediaProgressSeen = false
-                    DownloadState.log = (DownloadState.log +
+                    taskState.log = (taskState.log +
                         "\nShared HLS capture failed; retrying separate streams with timestamp correction.")
                         .takeLast(MAX_LOG_CHARS)
                     recordPairedStreams(video, audio, output, referer, userAgent, videoCookie,
@@ -735,24 +1057,34 @@ class RecordingService : Service() {
                 }
                 error("Paired stream recorder exited with code $exit.")
             }
-            if (relay != null && audioDelayMs == 0 && !forceSeparateInputs &&
+            if (relay != null && !combinedInput && audioDelayMs == 0 && !forceSeparateInputs &&
                 !discardWhenStopped && output.isFile && output.length() > 188L) {
                 // The live recorder must finish writing before any audio is altered.
                 // Use source playlist time for the initial offset and verified video
                 // holes; never guess an offset from network arrival times.
                 val timeline = relay.audioTimeline()
                 timingSnapshot = timeline
-                val filter = timeline.filter()
+                val packets = capturedPacketTiming
+                val origin = packets?.originSeconds()
+                val firstVideo = packets?.video?.firstSeconds()
+                val lastVideo = packets?.video?.lastSeconds()?.let { it + (packets.video.estimatedFrameSeconds() ?: 0.050) }
+                // The demuxer already puts the two tracks on the packet clock. Do not
+                // apply the playlist start difference a second time. Bound padding
+                // to the observed video end instead of padding indefinitely.
+                val filter = if (origin != null && firstVideo != null && lastVideo != null &&
+                    lastVideo > firstVideo && kotlin.math.abs(firstVideo - (packets.audio.firstSeconds() ?: firstVideo)) < 30 && packets.video.backwards == 0L && packets.audio.backwards == 0L)
+                    timeline.filter(firstVideo - origin, lastVideo - origin) else null
+                plannedAudioFilter = filter
                 if (filter == null) {
                     audioFinalizationBypassed = true
                     timingOutcome = "original_timeline_unavailable"
-                    timingFailureReason = "Source playlist time was unavailable for one or both tracks."
-                    relay.logDiagnosticEvent("audio timeline unavailable: source playlist wall-clock missing; original capture retained")
+                    timingFailureReason = "Source/packet timing was missing, discontinuous, or a source gap may have been compressed by capture timestamp correction."
+                    relay.logDiagnosticEvent("audio timeline correction not safely determined from source and packet clocks; original capture retained")
                 } else {
                     val gapCount = timeline.videoGaps.size
                     relay.logDiagnosticEvent("audio timeline finalization started; video gaps=$gapCount, " +
                         "source start offset=${(timeline.audioStartMs - timeline.videoStartMs)}ms")
-                    DownloadState.log = (DownloadState.log +
+                    taskState.log = (taskState.log +
                         "\nFinalizing audio against the source video timeline; $gapCount video gaps.")
                         .takeLast(MAX_LOG_CHARS)
                     val processed = File(output.parentFile, output.nameWithoutExtension + "-aligned.ts")
@@ -765,7 +1097,7 @@ class RecordingService : Service() {
                             "-progress", "pipe:1",
                             "-y", "-i", output.absolutePath, "-map", "0:v:0", "-map", "0:a:0",
                             "-c:v", "copy", "-af", filter, "-c:a", "aac", "-b:a", "128k",
-                            "-shortest", "-f", "mpegts", processed.absolutePath)
+                            "-f", "mpegts", processed.absolutePath)
                         val finalizer = ProcessBuilder(args).also(::configure).start()
                         activeFinalizer = finalizer
                         val finalizationStart = SystemClock.elapsedRealtime()
@@ -829,9 +1161,9 @@ class RecordingService : Service() {
                         java.nio.file.Files.move(processed.toPath(), output.toPath(),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                         audioFinalizationCompleted = true
-                        timingOutcome = "aligned"
-                        relay.logDiagnosticEvent("audio timeline finalization completed; video gaps muted=$gapCount")
-                        DownloadState.log = (DownloadState.log + "\nAudio timing finalized; source video gaps muted=$gapCount.")
+                        timingOutcome = "audio_processed_not_lipsync_verified"
+                        relay.logDiagnosticEvent("audio timeline processing completed; video gaps muted=$gapCount; lip sync not independently verified")
+                        taskState.log = (taskState.log + "\nAudio timing processed; source video gaps muted=$gapCount. Lip sync has not been independently verified.")
                             .takeLast(MAX_LOG_CHARS)
                     } catch (failure: Exception) {
                         audioFinalizationBypassed = true
@@ -840,7 +1172,7 @@ class RecordingService : Service() {
                             ?: failure.javaClass.simpleName
                         relay.logDiagnosticEvent("audio finalization failed; keeping original recording: " +
                             failure.javaClass.simpleName)
-                        DownloadState.log = (DownloadState.log +
+                        taskState.log = (taskState.log +
                             "\nAudio timing finalization failed; original recording kept. " +
                             failure.message.orEmpty().take(160)).takeLast(MAX_LOG_CHARS)
                     } finally {
@@ -855,14 +1187,35 @@ class RecordingService : Service() {
             playlistServer?.close()
             if (liveRelay === relay) liveRelay = null
             relay?.close()
-            if (relay != null) DownloadState.log = (DownloadState.log +
+            if (relay != null) taskState.log = (taskState.log +
                 "\n" + relay.report()).takeLast(MAX_LOG_CHARS)
         }
     }
 
+    /** Observes output only; capture selection and normal download paths are unchanged. */
+    private fun watchDirectCompletion(output: File) {
+        fun mediaBytes()=output.parentFile?.listFiles().orEmpty().filter { it.isFile &&
+            it.name.startsWith(output.nameWithoutExtension) && it.extension.lowercase() in setOf("ts","mp4","m4a","webm","mkv","aac","m4s","part") }.sumOf { it.length() }
+        var lastBytes=mediaBytes();var lastGrowth=SystemClock.elapsedRealtime()
+        val watched=completionMonitor
+        val handler=android.os.Handler(mainLooper)
+        handler.post(object: Runnable {
+            override fun run() {
+                if(!directCaptureActive || stopWasRequested || completionMonitor!==watched) return
+                val now=SystemClock.elapsedRealtime();val bytes=mediaBytes()
+                if(bytes>lastBytes) { lastBytes=bytes;lastGrowth=now }
+                if(watched?.reason!=null && now-lastGrowth>=STALL_WARNING_MS) {
+                    confirmedCompletion=true;recordSafeEvent("stream_end_drain_finished; "+watched.reason)
+                    stopRecording(save=true);return
+                }
+                handler.postDelayed(this,1500)
+            }
+        })
+    }
+
     private fun stopRecording(save: Boolean) {
-        if (!DownloadState.running || DownloadState.operation != DownloadState.OPERATION_RECORD) return
-        DownloadState.recording403RecoveryAvailable = false
+        if (!taskState.running || taskState.operation != taskState.OPERATION_RECORD) return
+        taskState.recording403RecoveryAvailable = false
         val alreadyStopping = stopWasRequested
         recordSafeEvent(if (save) "stop_and_save_requested" else "cancel_and_discard_requested")
         saveWhenStopped = save
@@ -887,9 +1240,12 @@ class RecordingService : Service() {
     }
 
     private fun renewStream(intent: Intent) {
-        if (!DownloadState.running || DownloadState.operation != DownloadState.OPERATION_RECORD ||
+        if (!taskState.running || taskState.operation != taskState.OPERATION_RECORD ||
             stopWasRequested) return
-        val relay = liveRelay ?: return
+        val relay = liveRelay ?: run {
+            recordSafeEvent("renewal_unavailable_no_live_relay")
+            return
+        }
         val kind = intent.getStringExtra(EXTRA_RENEW_KIND).orEmpty()
         val url = intent.getStringExtra(EXTRA_URL).orEmpty()
         if (!MediaUrlClassifier.isContinuousManifest(url) || !url.substringBefore('?').endsWith(".m3u8", true)) {
@@ -902,8 +1258,8 @@ class RecordingService : Service() {
             intent.getStringExtra(EXTRA_REFERER).orEmpty(),
             intent.getStringExtra(EXTRA_COOKIES).orEmpty(),
             parseHeaders(intent.getStringExtra(EXTRA_HEADERS_JSON).orEmpty()))
-        if (relay.renew(kind, url, access)) {
-            DownloadState.log = (DownloadState.log +
+        if (relay.renew(kind, url, access, intent.getBooleanExtra(EXTRA_RENEW_FORCE, false))) {
+            taskState.log = (taskState.log +
                 "\nBrowser supplied updated $kind stream credentials; checking for a successful new segment.")
                 .takeLast(MAX_LOG_CHARS)
             sendState()
@@ -914,32 +1270,49 @@ class RecordingService : Service() {
     }
 
     private fun recordBrowserEvent(intent: Intent) {
-        if (!DownloadState.running || DownloadState.operation != DownloadState.OPERATION_RECORD) return
+        if (!taskState.running || taskState.operation != taskState.OPERATION_RECORD) return
         val event = intent.getStringExtra(EXTRA_EVENT_CODE).orEmpty()
-        if (event.length !in 3..64 || !event.all { it in 'a'..'z' || it == '_' }) return
+        if (event.length !in 3..64 || !event.all { it in 'a'..'z' || it in '0'..'9' || it == '_' }) return
         if (!stopWasRequested && outputStalledSince != 0L &&
             event in setOf("manual_403_browser_opened", "manual_403_stream_check_requested")) {
             lastStallUserActionAt = SystemClock.elapsedRealtime()
             recordSafeEvent("stall_timeout_reset_by_user")
         }
-        recordSafeEvent(event)
+        val detail = intent.getStringExtra(EXTRA_EVENT_DETAIL).orEmpty().take(500)
+        val safeDetail = detail.takeIf { it.all { c -> c.isLetterOrDigit() || c in " ,;:=._()+-" } }.orEmpty()
+        recordSafeEvent(event + if (safeDetail.isNotBlank()) ": $safeDetail" else "")
+    }
+
+    private val directDiagnosticKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private fun recordDirectDiagnosticOnce(key: String, message: String) {
+        if (directDiagnosticKeys.add(key)) recordSafeEvent(message)
     }
 
     private fun recordSafeEvent(event: String) {
         val elapsed = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L) / 1_000L
-        DownloadState.log = (DownloadState.log + "\n+$elapsed s $event").takeLast(MAX_LOG_CHARS)
+        taskState.log = (taskState.log + "\n+$elapsed s $event").takeLast(MAX_LOG_CHARS)
         val relay = liveRelay
-        if (relay != null) relay.logDiagnosticEvent(event) else pendingSafeEvents.add(event)
+        if (relay != null) relay.logDiagnosticEvent(event) else {
+            val file = detailedLogFile
+            if (file == null) pendingSafeEvents.add(event)
+            else synchronized(directDiagnosticKeys) {
+                runCatching { file.appendText("+$elapsed s $event\n") }
+            }
+        }
         sendState()
     }
 
     private fun recordingStatus(folder: File): String {
+        if(!stopWasRequested && !discardWhenStopped) try { storageWatch?.poll() } catch(e: InsufficientStorage) {
+            recordSafeEvent(StorageGuard.MESSAGE)
+            stopRecording(save=true)
+        }
         val seconds = (SystemClock.elapsedRealtime() - startedAt) / 1000
         if (outputStalledSince != 0L) {
             val stalledSeconds = (SystemClock.elapsedRealtime() - outputStalledSince) / 1000
             val remaining = ((STALL_AUTO_SAVE_MS -
                 (SystemClock.elapsedRealtime() - lastStallUserActionAt)).coerceAtLeast(0L) + 999L) / 1000L
-            return if (DownloadState.recording403RecoveryAvailable)
+            return if (taskState.recording403RecoveryAvailable)
                 "Recording stalled under 403 • ${stalledSeconds}s • auto-save in ${remaining}s without input • Reopen stream or Stop & save"
             else "Recording stalled • ${stalledSeconds}s • auto-save in ${remaining}s without input • Stop & save available"
         }
@@ -985,7 +1358,7 @@ class RecordingService : Service() {
         } finally { extractor.release() }
     }.getOrNull()
 
-    private fun export(candidate: RecordingMedia.Candidate): Uri {
+    private fun export(candidate: RecordingMedia.Candidate, tail: RecordingTsTail.Plan? = null): Uri {
         val source = candidate.file
         val extension = candidate.extension
         val displayName = source.name.substringBefore('.') + "." + extension
@@ -1004,11 +1377,12 @@ class RecordingService : Service() {
         val uri = contentResolver.insert(collection, values) ?: error("Android could not create the recording.")
         try {
             contentResolver.openOutputStream(uri, "w")!!.use { output ->
-                copyRecordingWithProgress(source, output)
+                copyRecordingWithProgress(source, output, tail)
             }
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             contentResolver.update(uri, values, null, null)
+            TransferQueue.exported(this, transferId, uri,transferLease)
             return uri
         } catch (error: Exception) {
             contentResolver.delete(uri, null, null)
@@ -1060,7 +1434,25 @@ class RecordingService : Service() {
             }
         }
         return JSONObject().apply {
-            put("schema_version", 1)
+            put("schema_version", 2)
+            fun packetReport(packets: TransportStreamTiming?): Any = packets?.let {
+                JSONObject().apply {
+                    put("video_first_pts_seconds", it.video.firstSeconds() ?: JSONObject.NULL)
+                    put("video_last_pts_seconds", it.video.lastSeconds() ?: JSONObject.NULL)
+                    put("audio_first_pts_seconds", it.audio.firstSeconds() ?: JSONObject.NULL)
+                    put("audio_last_pts_seconds", it.audio.lastSeconds() ?: JSONObject.NULL)
+                    put("video_packet_span_seconds", it.video.spanSeconds() ?: JSONObject.NULL)
+                    put("audio_packet_span_seconds", it.audio.spanSeconds() ?: JSONObject.NULL)
+                    put("estimated_video_frame_seconds", it.video.estimatedFrameSeconds() ?: JSONObject.NULL)
+                    put("bytes_sampled", it.bytesScanned)
+                    put("whole_file_scanned", it.complete)
+                    put("backward_video_pts_over_1s", it.video.backwards)
+                    put("backward_audio_pts_over_1s", it.audio.backwards)
+                }
+            } ?: JSONObject.NULL
+            put("captured_packet_timing", packetReport(capturedPacketTiming))
+            put("saved_packet_timing", packetReport(savedPacketTiming))
+            put("lip_sync_verified", false)
             put("recording_file", source.name)
             put("result", timingOutcome)
             put("failure_reason", timingFailureReason)
@@ -1080,7 +1472,7 @@ class RecordingService : Service() {
             put("audio_gaps", gaps(timeline?.audioGaps.orEmpty()))
             put("video_source_clock_jumps", gaps(timeline?.videoClockJumps.orEmpty()))
             put("audio_source_clock_jumps", gaps(timeline?.audioClockJumps.orEmpty()))
-            put("planned_audio_filter", timeline?.filter() ?: JSONObject.NULL)
+            put("planned_audio_filter", plannedAudioFilter ?: JSONObject.NULL)
             put("capture_media_seconds", if (mediaProgressSeen) recordedMediaSeconds else JSONObject.NULL)
             put("capture_elapsed_seconds", elapsedSeconds)
             put("saved_file_bytes", source.length())
@@ -1093,9 +1485,12 @@ class RecordingService : Service() {
         buildMap { value.keys().forEach { key -> value.optString(key).takeIf(String::isNotBlank)?.let { put(key, it) } } }
     }.getOrDefault(emptyMap())
 
-    private fun copyRecordingWithProgress(source: File, target: java.io.OutputStream) {
-        val total = source.length().coerceAtLeast(1L)
-        val base = if (audioFinalizationCompleted || DownloadState.progress > 1) 80 else 1
+    private fun copyRecordingWithProgress(source: File, target: java.io.OutputStream, tail: RecordingTsTail.Plan? = null) {
+        if (tail != null) check(source.length() == tail.sourceBytes) { "Recording changed during finalization" }
+        val total = (tail?.exportBytes() ?: source.length()).coerceAtLeast(1L)
+        StorageGuard.destination(this,total)
+        val storage=StorageGuard.Watch(this)
+        val base = if (audioFinalizationCompleted || taskState.progress > 1) 80 else 1
         val span = 99 - base
         var copied = 0L
         var lastPercent = -1
@@ -1105,8 +1500,14 @@ class RecordingService : Service() {
         FileInputStream(source).use { input ->
             val buffer = ByteArray(256 * 1024)
             while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
+                val remaining = tail?.let { it.prefixBytes - copied }
+                if (remaining == 0L) break
+                val count = input.read(buffer, 0, remaining?.coerceAtMost(buffer.size.toLong())?.toInt() ?: buffer.size)
+                if (count < 0) {
+                    check(tail == null) { "Recording ended while copying the verified prefix" }
+                    break
+                }
+                storage.poll()
                 target.write(buffer, 0, count)
                 copied += count
                 val percent = (base + (copied.toDouble() / total * span).toInt()).coerceIn(base, 99)
@@ -1122,23 +1523,28 @@ class RecordingService : Service() {
                 }
             }
         }
+        if (tail != null) {
+            check(source.length() == tail.sourceBytes) { "Recording changed during finalization" }
+            storage.poll()
+            target.write(tail.suffix)
+        }
         savingProgress(99, "Finishing save", null)
     }
 
     private fun savingProgress(percent: Int, stage: String, remainingSeconds: Long?) {
-        DownloadState.progress = percent.coerceIn(1, 99)
+        taskState.progress = percent.coerceIn(1, 99)
         val eta = remainingSeconds?.let { seconds ->
             val minutes = seconds / 60
             if (minutes > 0) " • about ${minutes}m ${seconds % 60}s left"
             else " • about ${seconds}s left"
         }.orEmpty()
-        update("$stage • ${DownloadState.progress}%$eta")
+        update("$stage • ${taskState.progress}%$eta")
     }
 
     private fun update(status: String) {
-        DownloadState.status = status
+        taskState.status = status
         sendState()
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
+        updateTaskNotification(notificationId(NOTIFICATION_ID), notification(status))
     }
 
     private fun recordingFailureStatus(log: String): String {
@@ -1166,24 +1572,24 @@ class RecordingService : Service() {
     }
 
     private fun showStallNotification(message: String) {
-        val stop = PendingIntent.getService(this, STALL_NOTIFICATION_ID,
-            Intent(this, RecordingService::class.java).setAction(ACTION_STOP_SAVE),
+        val stop = PendingIntent.getService(this, notificationId(STALL_NOTIFICATION_ID),
+            Intent(this, RecordingService::class.java).setAction(ACTION_STOP_SAVE).putExtra(TransferQueue.JOB,taskId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val notice = NotificationCompat.Builder(this, STALL_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_download)
             .setContentTitle("Stream recording stalled")
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))
-            .setContentIntent(PendingIntent.getActivity(this, STALL_NOTIFICATION_ID,
+            .setContentIntent(PendingIntent.getActivity(this, notificationId(STALL_NOTIFICATION_ID),
                 Intent(this, MainActivity::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setOnlyAlertOnce(true)
             .apply {
-                if (DownloadState.recording403RecoveryAvailable) {
-                    addAction(0, "Reopen stream", PendingIntent.getActivity(this@RecordingService,
-                        STALL_NOTIFICATION_ID + 1, Intent(this@RecordingService, BrowserSessionActivity::class.java)
+                if (taskState.recording403RecoveryAvailable) {
+                    addAction(0, "Reopen stream", PendingIntent.getActivity(this@RecordingEngine,
+                        notificationId(STALL_NOTIFICATION_ID) + 1, Intent(this@RecordingEngine, BrowserSessionActivity::class.java)
                             .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                            .putExtra(BrowserSessionActivity.EXTRA_PAGE_URL, DownloadState.recordingPageUrl)
+                            .putExtra(BrowserSessionActivity.EXTRA_PAGE_URL, taskState.recordingPageUrl)
                             .putExtra(BrowserSessionActivity.EXTRA_MODE, BrowserSessionActivity.MODE_RECORD)
                             .putExtra(BrowserSessionActivity.EXTRA_RECOVERY, true),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
@@ -1191,37 +1597,39 @@ class RecordingService : Service() {
             }
             .addAction(0, "Stop & save", stop)
             .build()
-        getSystemService(NotificationManager::class.java).notify(STALL_NOTIFICATION_ID, notice)
+        updateTaskNotification(notificationId(STALL_NOTIFICATION_ID), notice)
     }
 
     private fun finish(status: String, log: String) {
+        transferStatus=status;transferLog=log
+        TransferQueue.finalizing(this,transferId,status,transferLease)
         outputStalledSince = 0L
         lastStallUserActionAt = 0L
-        DownloadState.recording403RecoveryAvailable = false
-        DownloadState.recordingPageUrl = ""
-        DownloadState.recordingVideoUrl = ""
-        DownloadState.recordingAudioUrl = ""
-        getSystemService(NotificationManager::class.java).cancel(STALL_NOTIFICATION_ID)
-        DownloadState.running = false
-        DownloadState.operation = DownloadState.OPERATION_IDLE
-        DownloadState.progress = if (status.startsWith("Recording saved") ||
+        taskState.recording403RecoveryAvailable = false
+        taskState.recordingPageUrl = ""
+        taskState.recordingVideoUrl = ""
+        taskState.recordingAudioUrl = ""
+        getSystemService(NotificationManager::class.java).cancel(notificationId(STALL_NOTIFICATION_ID))
+        taskState.running = false
+        taskState.operation = taskState.OPERATION_IDLE
+        taskState.progress = if (status.startsWith("Recording saved") ||
             status.startsWith("Partial recording saved")) 100 else 0
-        DownloadState.status = status
-        DownloadState.log = log.takeLast(MAX_LOG_CHARS)
+        taskState.status = status
+        taskState.log = log.takeLast(MAX_LOG_CHARS)
         sendState()
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status, true))
-        stopForeground(STOP_FOREGROUND_DETACH)
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     private fun sendState() {
+        TransferQueue.progress(this,transferId,taskState.status,taskState.log,transferLease,taskState.progress)
         sendBroadcast(Intent(DownloadService.ACTION_STATE).setPackage(packageName).apply {
-            putExtra(DownloadService.EXTRA_RUNNING, DownloadState.running)
-            putExtra(DownloadService.EXTRA_OPERATION, DownloadState.operation)
-            putExtra(DownloadService.EXTRA_PROGRESS, DownloadState.progress)
-            putExtra(DownloadService.EXTRA_STATUS, DownloadState.status)
-            putExtra(DownloadService.EXTRA_LOG, DownloadState.log)
-            putExtra(EXTRA_403_RECOVERY_AVAILABLE, DownloadState.recording403RecoveryAvailable)
+            putExtra(DownloadService.EXTRA_RUNNING, taskState.running)
+            putExtra(DownloadService.EXTRA_OPERATION, taskState.operation)
+            putExtra(DownloadService.EXTRA_PROGRESS, taskState.progress)
+            putExtra(DownloadService.EXTRA_STATUS, taskState.status)
+            putExtra(DownloadService.EXTRA_LOG, taskState.log)
+            putExtra(EXTRA_403_RECOVERY_AVAILABLE, taskState.recording403RecoveryAvailable)
         })
     }
 
@@ -1230,14 +1638,14 @@ class RecordingService : Service() {
             .setSmallIcon(R.drawable.ic_download)
             .setContentTitle("yt-dlp Mobile stream recorder")
             .setContentText(status)
-            .setProgress(100, DownloadState.progress.coerceIn(0, 100),
-                !finished && DownloadState.progress == 0)
+            .setProgress(100, taskState.progress.coerceIn(0, 100),
+                !finished && taskState.progress == 0)
             .setOnlyAlertOnce(!finished)
             .setOngoing(!finished)
-            .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .setContentIntent(PendingIntent.getActivity(this, notificationId(0), Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .apply {
                 if (!finished) addAction(0, "Stop & save", PendingIntent.getService(
-                    this@RecordingService, 2, Intent(this@RecordingService, RecordingService::class.java).setAction(ACTION_STOP_SAVE),
+                    this@RecordingEngine, notificationId(2), Intent(this@RecordingEngine, RecordingService::class.java).setAction(ACTION_STOP_SAVE).putExtra(TransferQueue.JOB,taskId),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 ))
             }.build()
@@ -1268,6 +1676,10 @@ class RecordingService : Service() {
         const val ACTION_BROWSER_FINALIZING = "com.linfranca.ytdlpmobile.RECORD_BROWSER_FINALIZING"
         const val EXTRA_URL = "record_url"
         const val EXTRA_PAGE_URL = "record_page_url"
+        const val EXTRA_PAGE_COOKIES = "record_page_cookies"
+        const val EXTRA_PAGE_USER_AGENT = "record_page_user_agent"
+        const val EXTRA_PAGE_HEADERS_JSON = "record_page_headers_json"
+        const val EXTRA_PAGE_OBSERVATION = "record_page_observation"
         const val EXTRA_403_RECOVERY_AVAILABLE = "record_403_recovery_available"
         const val EXTRA_AUDIO_URL = "record_audio_url"
         const val EXTRA_AUDIO_DELAY_MS = "record_audio_delay_ms"
@@ -1278,6 +1690,9 @@ class RecordingService : Service() {
         const val EXTRA_HEADERS_JSON = "record_headers_json"
         const val EXTRA_AUDIO_HEADERS_JSON = "record_audio_headers_json"
         const val EXTRA_RENEW_KIND = "record_renew_kind"
+        const val EXTRA_RENEW_FORCE = "renew_verified_retry"
+        const val EXTRA_STREAM_DIAGNOSTICS = "stream_delivery_diagnostics"
+        const val EXTRA_EVENT_DETAIL = "record_event_detail"
         const val EXTRA_EVENT_CODE = "record_event_code"
         private const val CHANNEL_ID = "recording_channel"
         private const val NOTIFICATION_ID = 85
@@ -1354,5 +1769,44 @@ private class PairedCaptureTrace(private val startedMs: Long) {
             "last media progress ${age(lastMediaMs)}; last output growth ${age(lastBytesMs)}.\n" +
             "Request issues: ${problems.entries.joinToString { "${it.key}=${it.value}" }.ifBlank { "none observed" }}. " +
             "Trace duration ${(now - startedMs) / 1_000L}s."
+    }
+}
+
+class RecordingService : MediaTaskService() {
+    override fun createEngine(id: String): MediaTaskEngine = RecordingEngine(this,id)
+    override fun isStart(action: String?) = action in setOf(ACTION_START,ACTION_BROWSER_START)
+    companion object {
+        const val ACTION_START = "com.linfranca.ytdlpmobile.RECORD_START"
+        const val ACTION_BROWSER_START = "com.linfranca.ytdlpmobile.BROWSER_RECORD_START"
+        const val ACTION_BROWSER_FINISH = "com.linfranca.ytdlpmobile.BROWSER_RECORD_FINISH"
+        const val ACTION_BROWSER_STOP_REQUEST = "com.linfranca.ytdlpmobile.BROWSER_RECORD_STOP_REQUEST"
+        const val ACTION_STOP_SAVE = "com.linfranca.ytdlpmobile.RECORD_STOP_SAVE"
+        const val ACTION_CANCEL = "com.linfranca.ytdlpmobile.RECORD_CANCEL"
+        const val ACTION_RENEW_STREAM = "com.linfranca.ytdlpmobile.RECORD_RENEW_STREAM"
+        const val ACTION_BROWSER_EVENT = "com.linfranca.ytdlpmobile.RECORD_BROWSER_EVENT"
+        const val ACTION_USER_INTERACTION = "com.linfranca.ytdlpmobile.RECORD_USER_INTERACTION"
+        const val ACTION_BROWSER_REFRESH_REQUEST = "com.linfranca.ytdlpmobile.RECORD_BROWSER_REFRESH_REQUEST"
+        const val ACTION_BROWSER_FINALIZING = "com.linfranca.ytdlpmobile.RECORD_BROWSER_FINALIZING"
+        const val EXTRA_URL = "record_url"
+        const val EXTRA_PAGE_URL = "record_page_url"
+        const val EXTRA_PAGE_COOKIES = "record_page_cookies"
+        const val EXTRA_PAGE_USER_AGENT = "record_page_user_agent"
+        const val EXTRA_PAGE_HEADERS_JSON = "record_page_headers_json"
+        const val EXTRA_PAGE_OBSERVATION = "record_page_observation"
+        const val EXTRA_403_RECOVERY_AVAILABLE = "record_403_recovery_available"
+        const val EXTRA_AUDIO_URL = "record_audio_url"
+        const val EXTRA_AUDIO_DELAY_MS = "record_audio_delay_ms"
+        const val EXTRA_REFERER = "record_referer"
+        const val EXTRA_COOKIES = "record_cookies"
+        const val EXTRA_AUDIO_COOKIES = "record_audio_cookies"
+        const val EXTRA_USER_AGENT = "record_user_agent"
+        const val EXTRA_HEADERS_JSON = "record_headers_json"
+        const val EXTRA_AUDIO_HEADERS_JSON = "record_audio_headers_json"
+        const val EXTRA_RENEW_KIND = "record_renew_kind"
+        const val EXTRA_RENEW_FORCE = "renew_verified_retry"
+        const val EXTRA_STREAM_DIAGNOSTICS = "stream_delivery_diagnostics"
+        const val EXTRA_EVENT_DETAIL = "record_event_detail"
+        const val EXTRA_EVENT_CODE = "record_event_code"
+
     }
 }

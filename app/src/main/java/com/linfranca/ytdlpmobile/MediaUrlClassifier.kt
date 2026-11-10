@@ -25,6 +25,15 @@ object MediaUrlClassifier {
         "adformat=", "ad_type=", "adtype=", "is_ad=", "preroll=", "vast=", "vmap="
     )
 
+    /** Same explicit ad/control exclusions, without assuming a media filename extension. */
+    fun isPotentialMediaRequest(rawUrl: String): Boolean = runCatching {
+        val uri=URI(rawUrl);val host=uri.host.orEmpty().lowercase();val path=uri.rawPath.orEmpty().lowercase();val query=uri.rawQuery.orEmpty().lowercase()
+        uri.scheme in setOf("http","https") && host.contains('.') && uri.userInfo==null && rawUrl.none(Char::isWhitespace) &&
+            blockedHostTokens.none(host::contains) && host.split('.').none { it in setOf("ad","ads","advert","advertising","adserver") } &&
+            blockedPathTokens.none(path::contains) && blockedQueryTokens.none(query::contains) &&
+            query.split('&').none { it.substringBefore('=') in setOf("ad","ads","ad_type","adtype","is_ad","preroll","vast","vmap") }
+    }.getOrDefault(false)
+
     fun isDirectMediaUrl(rawUrl: String): Boolean {
         val url = rawUrl.trim().replace("\\u0026", "&").replace("\\/", "/")
         val uri = runCatching { URI(url) }.getOrNull() ?: return false

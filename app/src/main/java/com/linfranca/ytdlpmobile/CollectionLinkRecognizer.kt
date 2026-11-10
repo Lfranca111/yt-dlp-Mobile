@@ -24,10 +24,20 @@ internal object CollectionLinkRecognizer {
             }.getOrNull()
         }.toMap()
 
-        val searchHint = "Search terms are already in this link. Collection downloads will be added in a later version."
-        val collectionHint = "Collection downloads will be added in a later version."
+        val searchHint = "Downloads matching collections using the filters already in this link."
+        val collectionHint = "Downloads the available files in source page order."
         val homeHint = "Site recognized. Paste a comic, album, gallery, or search-results page link."
 
+        CollectionSiteProfile.site(host)?.let { site ->
+            val type = CollectionSiteProfile.type(site, uri)
+            return Match(site, type, when (type) {
+                "Account page" -> "Open a public comic or gallery link. Personalized account pages are not collection sources."
+                "Non-collection page" -> "This page is not a comic or gallery."
+                "Site page" -> homeHint
+                "Collection listing" -> searchHint
+                else -> collectionHint
+            })
+        }
         return when (NativeMedia.site(host)) {
             1, 2, 3 -> {
                 val site = when {
@@ -57,7 +67,7 @@ internal object CollectionLinkRecognizer {
             }
             6 -> when {
                 parts.size < 2 -> Match("Multporn", "Site page", homeHint)
-                first in setOf("category", "characters", "category_hentai", "characters_hentai") ->
+                first in setOf("category", "characters", "category_hentai", "characters_hentai", "authors_hentai_comics", "manga") ->
                     Match("Multporn", "Comic listing", "Downloads the comics linked from every listing page.")
                 first in setOf("comics", "hentai_manga", "gay_porn_comics", "gif", "humor") ->
                     Match("Multporn", "Comic", collectionHint)
@@ -67,6 +77,7 @@ internal object CollectionLinkRecognizer {
                 else -> Match("Multporn", "Site page", homeHint)
             }
             7 -> when {
+                first == "browse" -> Match("Tailspace", "Comic listing", searchHint)
                 first == "c" && parts.size > 1 -> Match("Tailspace", "Comic", collectionHint)
                 first == "artist" && parts.size >= 4 && parts[2].equals("post", true) ->
                     Match("Tailspace", "Artist post", collectionHint)
@@ -79,6 +90,8 @@ internal object CollectionLinkRecognizer {
                 else -> Match("Yiffer", "Site page", homeHint)
             }
             9 -> when {
+                first in setOf("album", "albums") && parts.getOrNull(1) == "list" ->
+                    Match("Luscious", "Album listing", searchHint)
                 first in setOf("album", "albums") && parts.size > 1 ->
                     Match("Luscious", "Album", collectionHint)
                 first == "pictures" && parts.size > 1 ->

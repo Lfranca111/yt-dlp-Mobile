@@ -1,0 +1,10 @@
+{
+  "name": "monitoring-discovery-tests",
+  "private": true,
+  "scripts": {
+    "test": "node discovery.test.cjs && node --test live-learning.test.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "30.1.3"
+  }
+}
