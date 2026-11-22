@@ -2,7 +2,7 @@
 
 ## 1.0.87 update
 
-The current documentation target is **1.0.87**, consolidating the additions from **1.0.75 through 1.0.87** after the 1.0.74 baseline. The earlier descriptions below retain their original release context. See the [1.0.87 changelog](CHANGELOG.md#1087--release-target) and [new User Guide instructions](docs/USER_GUIDE.md#1087-additions).
+The current documentation target is **1.0.87**, consolidating the additions from **1.0.75 through 1.0.87** after the 1.0.74 baseline. The earlier descriptions below retain their original release context. See the [1.0.87 changelog](CHANGELOG.md#1087--release-target) and [new User Guide instructions](docs/USER_GUIDE.md#1087-additions). If your new to the app you can skip past the 1.0.87 additions sections and go to the main section of the [User Guide](docs/USER_GUIDE.md#contents).
 
 - **Save post as text** on Main opens a browser for exporting a readable post as **Plain text (.txt)** or **HTML copy (.html)**. Exports include the title and body. HTML keeps supported basic formatting and links for offline reading.
 - Save post supports identifiable Reddit posts, X posts, compatible article/post pages and scoped Facebook detail posts. Supported Facebook Reel detail pages can supply an authored caption for review. The exported file contains text rather than the post's images or video.
