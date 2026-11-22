@@ -20,8 +20,6 @@ An Android app for downloading video and audio, recording live streams, saving i
 
 Media processing runs on the device. The app uses yt-dlp for regular downloads, an embedded browser for assisted capture, and FFmpeg for media processing.
 
-> **Documentation target: 1.0.74**, the planned update from 1.0.63. See the [changelog](CHANGELOG.md#1074--release-target) for what changed and GitHub Releases for the APK actually available. Website support varies by page and access.
-
 [Get started](#quick-start) · [User Guide](docs/USER_GUIDE.md) · [Website and monitoring support](docs/USER_GUIDE.md#website-support-and-dedicated-handlers) · [Build Guide](docs/BUILDING.md) · [Changelog](CHANGELOG.md)
 
 ## Download and install
