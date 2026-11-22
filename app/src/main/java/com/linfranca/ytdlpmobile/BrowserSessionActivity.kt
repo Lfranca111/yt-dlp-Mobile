@@ -225,26 +225,15 @@ class BrowserSessionActivity : DisplayActivity() {
             }
             return true
         }
+        // Keep multi-window dispatch enabled so target=_blank cannot replace the main page.
+        binding.webView.settings.javaScriptCanOpenWindowsAutomatically = false
         binding.webView.settings.setSupportMultipleWindows(true)
-        binding.webView.webChromeClient=object: android.webkit.WebChromeClient() {
-            override fun onCreateWindow(view: WebView?,dialog: Boolean,userGesture: Boolean,message: android.os.Message?): Boolean {
-                // Fold explicit popup navigation into the existing history. Block unsolicited popups.
-                if(!userGesture || message==null) return false
-                val popup=WebView(this@BrowserSessionActivity)
-                popup.webViewClient=object: WebViewClient() {
-                    override fun shouldOverrideUrlLoading(v: WebView?,request: WebResourceRequest?): Boolean {
-                        if(request?.isForMainFrame != true) return true
-                        if(!handleAppLink(request) && BrowserWebNavigation.isWebScheme(request.url.scheme)) {
-                            appLinkBlocked = false
-                            binding.webView.loadUrl(browserNavigation.open(request.url.toString()))
-                        }
-                        binding.webView.post { popup.destroy() }
-                        return true
-                    }
-                }
-                (message.obj as? WebView.WebViewTransport)?.webView=popup
-                message.sendToTarget()
-                return true
+        binding.webView.webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onCreateWindow(view: WebView?, dialog: Boolean, userGesture: Boolean,
+                                        message: android.os.Message?): Boolean {
+                MonitoringStore.log(this@BrowserSessionActivity,
+                    "Browser popup blocked; userGesture=$userGesture; dialog=$dialog; historyAvailable=${binding.webView.canGoBack()}; URL values omitted")
+                return false
             }
         }
         if(mode==MODE_DOWNLOAD) downloadDiscovery=BrowserDownloadDiscovery(this,binding.webView,pageUrl,
@@ -265,9 +254,14 @@ class BrowserSessionActivity : DisplayActivity() {
                 return false
             }
             override fun doUpdateVisitedHistory(view: WebView?,url: String?,isReload: Boolean) {
+                if (mode == MODE_TEXT && url == binding.webView.url && url != postDocumentUrl) {
+                    postDocumentUrl = url
+                    resetPostSelection(cleanPage = true)
+                }
                 binding.browserBackButton.isEnabled=binding.webView.canGoBack()
             }
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
+                if (mode == MODE_TEXT) return super.shouldInterceptRequest(view, request)
                 request?.url?.toString()?.let { candidate ->
                     downloadDiscovery?.observe(candidate,request.requestHeaders)
                     if (request.isForMainFrame) {
@@ -319,6 +313,10 @@ class BrowserSessionActivity : DisplayActivity() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 downloadDiscovery?.navigation()
+                if (mode == MODE_TEXT) {
+                    postDocumentUrl = url
+                    resetPostSelection(cleanPage = false)
+                }
                 mainPageHttpError = null
                 pageLoadObservation = "navigation started; result not yet observed"
                 super.onPageStarted(view, url, favicon)
@@ -342,7 +340,7 @@ class BrowserSessionActivity : DisplayActivity() {
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
-                view?.let { MonitoringSession.observePage(it,"browser-page-finished") }
+                if (mode != MODE_TEXT) view?.let { MonitoringSession.observePage(it,"browser-page-finished") }
                 if (mainPageHttpError == null) browserNavigation.pageVisible(url)
                 downloadDiscovery?.ready()
                 binding.browserBackButton.isEnabled=binding.webView.canGoBack()
@@ -352,9 +350,11 @@ class BrowserSessionActivity : DisplayActivity() {
                     checkPlayerAfterReload()
                     return
                 }
-                if (captureActive || nativeRecordingActive || nativeRecordingCompleted) return
+                if (captureActive || nativeRecordingActive || nativeRecordingCompleted ||
+                    (mode == MODE_TEXT && (manualPostFormat != null || postCaptureBusy))) return
                 binding.browserStatus.text = when {
                     appLinkBlocked -> BrowserWebNavigation.APP_LINK_BLOCKED
+                    mode == MODE_TEXT -> "Open the full post, then tap Save post."
                     mode == MODE_RECORD -> "Play and unmute the actual video, then tap Find stream & record."
                     else -> "Play the video briefly, then tap Detect and download."
                 }
@@ -395,7 +395,7 @@ class BrowserSessionActivity : DisplayActivity() {
                     startService(Intent(this, RecordingService::class.java)
                         .setAction(RecordingService.ACTION_STOP_SAVE).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
                 } else findContinuousRecordingStream()
-            } else detectMedia()
+            } else if (mode == MODE_TEXT) choosePostFormat() else detectMedia()
         }
         binding.checkPlayingStreamButton.setOnClickListener {
             if (nativeRecordingActive) {
@@ -420,7 +420,12 @@ class BrowserSessionActivity : DisplayActivity() {
                     .setAction(RecordingService.ACTION_STOP_SAVE).putExtra(TransferQueue.JOB,captureLease.ifBlank { MediaTaskRuntime.idForPage(pageUrl,false) }))
             }
         }
-        binding.useMediaButton.text = if (mode == MODE_RECORD) "Find stream & record" else "Detect and download"
+        binding.useMediaButton.text = when (mode) {
+            MODE_RECORD -> "Find stream & record"
+            MODE_TEXT -> getString(R.string.save_post_text)
+            else -> "Detect and download"
+        }
+        if (mode == MODE_TEXT) binding.browserStatus.text = "Loading post…"
         if (intent.getBooleanExtra(EXTRA_RECOVERY, false)) enterRecovery()
         binding.webView.loadUrl(browserNavigation.open(pageUrl))
     }
@@ -991,6 +996,205 @@ class BrowserSessionActivity : DisplayActivity() {
             .show()
     }
 
+    private fun choosePostFormat() {
+        if (mainPageHttpError != null) {
+            binding.browserStatus.text = "The post did not load. Open a readable post and try again."
+            return
+        }
+        manualPostFormat?.takeIf { manualPostPage == binding.webView.url }?.let {
+            reviewSelectedPost(it)
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Save post as")
+            .setItems(arrayOf("Plain text (.txt)", "HTML copy (.html)")) { _, choice ->
+                savePost(if (choice == 0) PostTextExport.Format.TXT else PostTextExport.Format.HTML)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private var manualPostPage: String? = null
+    private var manualPostFormat: PostTextExport.Format? = null
+    private var postDocumentUrl: String? = null
+    private var postDocumentGeneration = 0L
+    private var postCaptureBusy = false
+    private var pendingPostDraft: PostTextContent.Post? = null
+    private var postReviewDialog: AlertDialog? = null
+    private val postSelectionAsset by lazy {
+        assets.open("post-text-selection.js").bufferedReader().use { it.readText() }
+    }
+
+    private fun resetPostSelection(cleanPage: Boolean) {
+        postDocumentGeneration++
+        postCaptureBusy = false
+        manualPostPage = null
+        manualPostFormat = null
+        pendingPostDraft = null
+        postReviewDialog?.dismiss()
+        postReviewDialog = null
+        if (cleanPage) binding.webView.evaluateJavascript(PostTextContent.endSelection, null)
+        binding.useMediaButton.text = getString(R.string.save_post_text)
+        binding.useMediaButton.isEnabled = true
+    }
+
+    private fun currentPost(page: String, generation: Long) =
+        !isFinishing && !isDestroyed && binding.webView.url == page &&
+            postDocumentGeneration == generation && mainPageHttpError == null
+
+    private fun startManualPost(page: String, format: PostTextExport.Format) {
+        manualPostPage = page
+        manualPostFormat = format
+        binding.webView.evaluateJavascript(PostTextContent.beginSelection(postSelectionAsset), null)
+        binding.useMediaButton.text = "Review selected text"
+        binding.browserStatus.text = "Tap or long press the post text, then Review selected text. Review also lets you paste or retry."
+    }
+
+    private fun savePost(format: PostTextExport.Format, retry: Boolean = false, reviewAfterRescan: Boolean = false) {
+        val current = binding.webView.url ?: return
+        if (postCaptureBusy || mainPageHttpError != null) return
+        if (!retry && manualPostPage == current) {
+            reviewSelectedPost(manualPostFormat ?: format)
+            return
+        }
+        val generation = postDocumentGeneration
+        postCaptureBusy = true
+        manualPostPage = null
+        manualPostFormat = null
+        pendingPostDraft = null
+        binding.useMediaButton.text = getString(R.string.save_post_text)
+        binding.useMediaButton.isEnabled = false
+        binding.browserStatus.text = "Reading the post…"
+        binding.webView.evaluateJavascript(PostTextContent.capture(postSelectionAsset)) { raw ->
+            if (isFinishing || isDestroyed || postDocumentGeneration != generation) return@evaluateJavascript
+            lifecycleScope.launch {
+                try {
+                    val payload = runCatching { JSONObject(raw.orEmpty()) }.getOrNull()
+                    val evidence = payload?.optJSONObject("diagnostics")
+                    val reason = evidence?.optString("reason").orEmpty().takeIf {
+                        it.matches(Regex("[a-z-]{1,40}"))
+                    } ?: "unknown"
+                    val html = payload?.optString("html").orEmpty()
+                    val requiresReview = payload?.optBoolean("review") == true
+                    val post = withContext(Dispatchers.Default) {
+                        runCatching { PostTextContent.parse(pageUrl, current, payload?.optString("title").orEmpty(), html) }
+                            .onFailure {
+                                MonitoringStore.log(this@BrowserSessionActivity,
+                                    "Post export parse failed; type=${it.javaClass.simpleName}; values omitted")
+                            }.getOrNull()
+                    }
+                    MonitoringStore.log(this@BrowserSessionActivity,
+                        "Post export capture; reason=$reason; articles=${evidence?.optInt("articles") ?: 0}; bodies=${evidence?.optInt("bodies") ?: 0}; matched=${evidence?.optInt("matched") ?: 0}; candidates=${evidence?.optInt("candidates") ?: 0}; eligible=${evidence?.optInt("eligible") ?: 0}; htmlChars=${html.length}; parsed=${post != null}; review=$requiresReview; values omitted")
+                    if (!currentPost(current, generation)) {
+                        if (postDocumentGeneration == generation)
+                            binding.browserStatus.text = "The page changed or failed to load. Open the intended post and try again."
+                        return@launch
+                    }
+                    if (post == null || requiresReview || reviewAfterRescan) {
+                        startManualPost(current, format)
+                        pendingPostDraft = post
+                        if (reason == "fb-expand-text-first") {
+                            binding.browserStatus.text = "Tap More or See more on the page first, then Review selected text."
+                        } else if (post != null) {
+                            binding.browserStatus.text =
+                                "Possible post text found. Tap Review to check it, or select different text on the page first."
+                        }
+                        if (reviewAfterRescan && reason != "fb-expand-text-first") {
+                            showPostReview(format, current, generation, post?.title ?: payload?.optString("title").orEmpty(),
+                                post?.body.orEmpty(), post)
+                        }
+                        return@launch
+                    }
+                    val savedName = withContext(Dispatchers.IO) {
+                        runCatching { PostTextExport.save(applicationContext, post, format) }.getOrNull()
+                    }
+                    if (isFinishing || isDestroyed) return@launch
+                    if (savedName != null) {
+                        Toast.makeText(applicationContext, "Saved $savedName in Downloads/yt-dlp Mobile.", Toast.LENGTH_LONG).show()
+                        finish()
+                    } else binding.browserStatus.text = "Could not save the file. Check free storage and try again."
+                } finally {
+                    if (postDocumentGeneration == generation && !isFinishing && !isDestroyed) {
+                        postCaptureBusy = false
+                        binding.useMediaButton.isEnabled = true
+                    }
+                }
+            }
+        }
+    }
+
+    private fun reviewSelectedPost(format: PostTextExport.Format) {
+        val current = binding.webView.url ?: return
+        val generation = postDocumentGeneration
+        if (!currentPost(current, generation) || postReviewDialog?.isShowing == true) return
+        binding.webView.evaluateJavascript(PostTextContent.readSelection(postSelectionAsset)) { raw ->
+            if (!currentPost(current, generation)) return@evaluateJavascript
+            val payload = runCatching { JSONObject(raw.orEmpty()) }.getOrNull()
+            if (payload?.optBoolean("rescan") == true) {
+                pendingPostDraft = null
+                savePost(format, retry = true, reviewAfterRescan = true)
+                return@evaluateJavascript
+            }
+            val text = payload?.optString("text").orEmpty().takeIf { it.length <= 300000 }.orEmpty()
+            val original = pendingPostDraft?.takeIf { text.isBlank() }
+            showPostReview(format, current, generation, original?.title ?: payload?.optString("title").orEmpty(),
+                original?.body ?: text, original)
+        }
+    }
+
+    private fun showPostReview(format: PostTextExport.Format, current: String, generation: Long,
+                               title: String, draft: String, original: PostTextContent.Post? = null) {
+        if (!currentPost(current, generation) || postReviewDialog?.isShowing == true) return
+        val input = android.widget.EditText(this).apply {
+            hint = "Paste post text, or go back to select it."
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 4
+            maxLines = 12
+            filters = arrayOf(android.text.InputFilter.LengthFilter(300000))
+            setText(draft)
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(input) }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Review selected text")
+            .setMessage("Check that this is the intended post. Images and videos are not saved.")
+            .setView(scroll).setPositiveButton("Save", null).setNegativeButton("Back to page", null)
+            .setNeutralButton("Retry auto") { _, _ ->
+                if (currentPost(current, generation)) savePost(format, retry = true)
+            }.create()
+        postReviewDialog = dialog
+        dialog.setOnDismissListener {
+            if (postReviewDialog === dialog) postReviewDialog = null
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                if (!currentPost(current, generation)) return@setOnClickListener
+                val text = input.text.toString()
+                val post = if (original != null && text == draft) original
+                    else PostTextContent.fromSelectedText(title, text)
+                if (post == null) { input.error = "Select or paste the post text first."; return@setOnClickListener }
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
+                lifecycleScope.launch {
+                    val saved = withContext(Dispatchers.IO) {
+                        runCatching { PostTextExport.save(applicationContext, post, format) }
+                    }
+                    if (isFinishing || isDestroyed) return@launch
+                    saved.onSuccess {
+                        Toast.makeText(applicationContext, "Saved $it in Downloads/yt-dlp Mobile.", Toast.LENGTH_LONG).show()
+                        dialog.dismiss()
+                        binding.webView.evaluateJavascript(PostTextContent.endSelection, null)
+                        finish()
+                    }.onFailure {
+                        if (dialog.isShowing) {
+                            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                            input.error = "Could not save. Check storage and try again."
+                        }
+                    }
+                }
+            }
+        }
+        dialog.show()
+    }
+
     private fun detectMedia() { downloadDiscovery?.detect() }
 
     private fun selectBestCandidate(activeUrls: Set<String>): MediaCandidate? {
@@ -1101,6 +1305,7 @@ class BrowserSessionActivity : DisplayActivity() {
         const val EXTRA_MODE = "mode"
         const val MODE_DOWNLOAD = "download"
         const val MODE_RECORD = "record"
+        const val MODE_TEXT = "text"
 
         private const val FRESH_CANDIDATE_WINDOW_MS = 10_000L
         private val SAFE_CAPTURED_HEADERS = setOf(

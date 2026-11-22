@@ -67,7 +67,6 @@ internal class CollectionSources(
 ) {
     private val whitespacePattern = Regex("""\s+""")
     private val declaredPageCount = Regex("""numberOfPages[^0-9]{0,10}(\d{1,4})""")
-    private val pageLabelPattern = Regex("""(?:^|,\s*)page\s+(\d{1,4})\s*$""", RegexOption.IGNORE_CASE)
     private val pictureCountPattern = Regex("""(?:(\d+)\s+gifs?\s*/\s*)?(\d{1,5})\s+pictures?""", RegexOption.IGNORE_CASE)
     private val readerIndexPattern = Regex("""(?:^|&)index=(\d+)""")
     private val readerReplacePattern = Regex("""([?&]index=)\d+""")
@@ -348,9 +347,9 @@ internal class CollectionSources(
         }
         // Comic pages expose a numbered image alt and an adjacent media URL.
         val base = route.uri.toString().substringBefore('?')
-        val first = tailspacePages(page).ifEmpty {
+        val first = TailspaceComicImages.read(page).ifEmpty {
             onEvent("Comic page images were not embedded in the overview; loading page 1.")
-            tailspacePages(get("$base?page=1"))
+            TailspaceComicImages.read(get("$base?page=1"))
         }
         if (first.isEmpty()) throw IllegalStateException("No comic pages found on this Tailspace page.")
         // The rendered description may contain comments such as "2 pages added".
@@ -362,20 +361,16 @@ internal class CollectionSources(
         val urls = first.toMutableMap()
         for (number in 1..count) {
             if (cancelled()) return
-            if (number !in urls) {
-                urls.putAll(tailspacePages(get("$base?page=$number")))
+            if (number !in urls || urls[number]?.isPreview == true) {
+                try { TailspaceComicImages.merge(urls, TailspaceComicImages.read(get("$base?page=$number"))) }
+                catch (error: InterruptedException) { throw error }
+                catch (error: Exception) { if (number !in urls || cancelled()) throw error }
             }
-            val url = urls[number] ?: throw IllegalStateException("Comic page $number of $count was not available.")
-            onBatch(number, listOf(CollectionItem(number.toString(), url, extension(url), number)))
-        }
-    }
-
-    private fun tailspacePages(html: String): Map<Int, String> = buildMap {
-        for (tag in imageTags(html)) {
-            val page = pageLabelPattern
-                .find(attribute(tag, "alt").orEmpty())?.groupValues?.get(1)?.toIntOrNull() ?: continue
-            val src = attribute(tag, "src") ?: continue
-            if (src.startsWith("https://pics.tailspace.com/comics/")) put(page, src)
+            val selected = urls[number] ?: throw IllegalStateException("Comic page $number of $count was not available.")
+            if (selected.isPreview) onEvent("Tailspace page $number: only a preview was available; using the displayed image.")
+            val image = selected.image
+            onBatch(number, listOf(CollectionItem(number.toString(), image.url, extension(image.identity), number,
+                fallbackUrl = image.previous)))
         }
     }
 

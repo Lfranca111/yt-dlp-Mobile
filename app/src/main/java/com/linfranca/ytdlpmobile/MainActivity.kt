@@ -341,6 +341,7 @@ class MainActivity : DisplayActivity() {
         formatInput.doAfterTextChanged { subtitleOptionsEnabled() }
         subtitleOptionsEnabled()
         downloadButton.setOnClickListener { startDownload() }
+        savePostTextButton.setOnClickListener { openBrowserAssist(BrowserSessionActivity.MODE_TEXT) }
         browserAssistButton.setOnClickListener { openBrowserAssist(BrowserSessionActivity.MODE_DOWNLOAD) }
         recordStreamButton.setOnClickListener { openBrowserAssist(BrowserSessionActivity.MODE_RECORD) }
         reopenStalledStreamButton.setOnClickListener {
@@ -615,12 +616,16 @@ class MainActivity : DisplayActivity() {
 
     private fun openBrowserAssist(mode: String) {
         val url = binding.urlInput.text?.toString()?.trim().orEmpty()
-        if (!validUrl(url)) { binding.urlInput.error = "Enter the protected webpage link first."; return }
+        if (!validUrl(url)) {
+            binding.urlInput.error = if (mode == BrowserSessionActivity.MODE_TEXT) "Enter the post link first."
+                else "Enter the protected webpage link first."
+            return
+        }
         launchBrowserAssist(mode, url)
     }
 
     private fun launchBrowserAssist(mode: String, url: String) {
-        val ig = SocialPostDownload.route(url)?.takeIf { it.name == "Instagram" }
+        val ig = if (mode == BrowserSessionActivity.MODE_TEXT) null else SocialPostDownload.route(url)?.takeIf { it.name == "Instagram" }
         val page = if (ig != null) "https://www.instagram.com/reel/${ig.postId}/".takeIf {
             java.net.URI(url).path.orEmpty().startsWith("/reel")
         } ?: url else url

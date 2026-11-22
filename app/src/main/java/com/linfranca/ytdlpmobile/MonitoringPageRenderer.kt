@@ -56,7 +56,14 @@ internal object MonitoringPageRenderer {
                 val w=WebView(c.applicationContext);view.set(w)
                 w.settings.apply {
                     javaScriptEnabled=true;domStorageEnabled=true;mediaPlaybackRequiresUserGesture=!livePlayback
-                    allowFileAccess=false;allowContentAccess=false;javaScriptCanOpenWindowsAutomatically=false;setSupportMultipleWindows(false)
+                    allowFileAccess=false;allowContentAccess=false;javaScriptCanOpenWindowsAutomatically=false;setSupportMultipleWindows(true)
+                }
+                w.webChromeClient=object: android.webkit.WebChromeClient() {
+                    override fun onCreateWindow(v: WebView?,dialog: Boolean,userGesture: Boolean,
+                                                message: android.os.Message?): Boolean {
+                        trace.event("popup-blocked","userGesture=$userGesture; URL values omitted")
+                        return false
+                    }
                 }
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(w,true)

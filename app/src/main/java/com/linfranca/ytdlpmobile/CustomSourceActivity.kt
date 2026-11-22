@@ -123,6 +123,16 @@ class CustomSourceActivity: DisplayActivity() {
         newest=CheckBox(this).apply { text="This channel lists newest uploads first" }
         web=WebView(this).apply {
             settings.javaScriptEnabled=true;settings.domStorageEnabled=true;settings.mediaPlaybackRequiresUserGesture=true
+            settings.javaScriptCanOpenWindowsAutomatically=false
+            settings.setSupportMultipleWindows(true)
+            webChromeClient=object: android.webkit.WebChromeClient() {
+                override fun onCreateWindow(view: WebView?,dialog: Boolean,userGesture: Boolean,
+                                            message: android.os.Message?): Boolean {
+                    MonitoringStore.log(this@CustomSourceActivity,
+                        "Custom source popup blocked; userGesture=$userGesture; dialog=$dialog; URL values omitted")
+                    return false
+                }
+            }
             CookieManager.getInstance().setAcceptCookie(true);CookieManager.getInstance().setAcceptThirdPartyCookies(this,true)
             webViewClient=object: WebViewClient() {
                 override fun shouldOverrideUrlLoading(v: WebView?, r: WebResourceRequest?): Boolean {

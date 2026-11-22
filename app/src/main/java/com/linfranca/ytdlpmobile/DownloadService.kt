@@ -182,6 +182,7 @@ internal class DownloadEngine(owner: MediaTaskService, taskId: String) : MediaTa
                 var responseOutput = ""
                 var attempt = 0
                 var useParallel = speedBoost && !websiteFailure.serialAni
+                var checkedRangedMp4 = false
                 if(websiteFailure.serialAni) appendLog("AniWaves normal download uses one fragment connection from the first attempt; existing Browser Assist is available if automatic recovery fails.")
                 while (true) {
                     val attemptLog = DownloadAttemptLog()
@@ -240,6 +241,12 @@ internal class DownloadEngine(owner: MediaTaskService, taskId: String) : MediaTa
                         appendLog(segmentAudit.summary())
                         storageError?.let { throw it }
                         if(StorageGuard.failure(error)) throw error
+                        if (browserCaptured && !checkedRangedMp4 && taskState.running && !receivedMediaProgress &&
+                            customArgs.isEmpty() && !playlist && !subtitles &&
+                            preset in setOf(PRESET_BEST, PRESET_MP4, PRESET_ORIGINAL)) {
+                            checkedRangedMp4 = true
+                            if (tryAstalaRangedMp4(downloadInfo, lastAttemptFailure, sessionDir, storageWatch)) break
+                        }
                         if(dedicated!=null && !browserCaptured) websiteFailure.mediaFailed(error,lastAttemptFailure)
                         if(!browserCaptured && taskState.running && preset !in setOf(PRESET_MP3,PRESET_M4A,DownloadService.PRESET_SUBTITLES) && PostprocessRecoveryPolicy.failure(lastAttemptFailure)) {
                             val selected=dedicated?.info ?: downloadInfo
@@ -448,6 +455,58 @@ internal class DownloadEngine(owner: MediaTaskService, taskId: String) : MediaTa
                 else MonitoringStore.log(this,"download workspace retained; task=$transferId; retry may resume supported partial downloads")
                 TransferQueue.complete(this,transferId,transferStatus,transferLog,lease=transferLease)
             }
+        }
+    }
+
+    private fun tryAstalaRangedMp4(info: String, failure: String, directory: File, storage: StorageGuard.Watch): Boolean {
+        val verified = runCatching { JSONObject(info) }.getOrNull() ?: return false
+        if (verified.optString("id") != "verified-video" || verified.has("formats") ||
+            verified.optString("ext") != "mp4" || verified.optBoolean("_app_audio_only")) return false
+        val page = verified.optString("webpage_url")
+        val media = verified.optString("url")
+        if (!AstalaRangedMp4.eligible(page, media, failure)) return false
+        // Do not mix an existing partial file with a different transfer method.
+        if (directory.listFiles().orEmpty().any { it.length() > 0 && it.name.endsWith(".part") }) return false
+        val headers = parseCapturedHeaders(verified.optJSONObject("http_headers")?.toString().orEmpty()).toMutableMap()
+        val cookies = MediaCookieJar().apply { load(verified.optString("_app_cookie_jar"), onlyForUrl = media) }.header(media)
+        if (cookies.isNotBlank()) headers["Cookie"] = cookies
+        val title = sanitizeFilename(verified.optString("title")).take(70)
+        val finished = File(directory, "$title.mp4")
+        if (finished.exists()) return false
+        val partial = File.createTempFile("astala-", ".part", directory)
+        appendLog("Browser Assist: direct MP4 returned HTTP 403; trying verified byte ranges for the same media.")
+        var lastPercent = -1
+        var lastUpdate = 0L
+        try {
+            val bytes = partial.outputStream().buffered().use { out ->
+                AstalaRangedMp4.copy(
+                    { java.net.URI(media).toURL().openConnection() as java.net.HttpURLConnection }, headers, out,
+                    { taskState.running }, { total -> StorageGuard.working(this, total, "ranged MP4") },
+                    { copied, total ->
+                        storage.poll()
+                        val percent = (copied.toDouble() * 100 / total).toInt().coerceIn(0, 98)
+                        val now = SystemClock.elapsedRealtime()
+                        if (percent != lastPercent && now - lastUpdate >= 500L) {
+                            lastPercent = percent
+                            lastUpdate = now
+                            updateState("Downloading MP4 $percent%", percent, taskState.log)
+                        }
+                    },
+                    ::appendLog
+                )
+            }
+            check(taskState.running) { "Download stopped" }
+            check(partial.length() == bytes && partial.renameTo(finished)) { "Could not finalize the verified MP4" }
+            appendLog("Browser Assist: verified complete MP4 byte count ($bytes bytes).")
+            return true
+        } catch (e: java.io.IOException) {
+            if (StorageGuard.failure(e) || !taskState.running) throw e
+            // Network exceptions can contain full signed URLs; log only the type.
+            val reason = if (e is AstalaRangedMp4.Rejected) e.message else e.javaClass.simpleName
+            appendLog("Browser Assist: ranged MP4 failed ($reason); no partial file exported.")
+            return false
+        } finally {
+            partial.delete()
         }
     }
 

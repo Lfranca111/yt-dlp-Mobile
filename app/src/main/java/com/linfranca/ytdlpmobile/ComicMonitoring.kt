@@ -69,6 +69,7 @@ class ComicMonitorWorker(c: Context,p: WorkerParameters): Worker(c,p) {
         if(!CollectionLane.lock.tryLock()) return Result.retry()
         var reschedule=false
         var attempted=false
+        var savedPages=0
         var journal="";val log=StringBuilder()
         fun event(s: String) { log.append(MonitoringStore.safe(s)).append('\n');MonitoringStore.log(c,"comic rule=$id; $s") }
         try {
@@ -103,8 +104,16 @@ class ComicMonitorWorker(c: Context,p: WorkerParameters): Worker(c,p) {
             check(ComicStore.mutate(c,id,generation) { it.put("known",ComicStore.array(fresh)).put("baseline",true).put("pending",ComicStore.array(pending.values.toList())).put("last",System.currentTimeMillis()).put("failures",0).put("recoveryKind","").put("status","${additions.size} new pages; ${pending.size} pending") }) { "Rule changed during check" }
             event("complete source check; ${fresh.size} pages; ${additions.size} new; ${pending.size} pending")
             if(additions.isNotEmpty() && !r.optBoolean("automatic")) MonitoringNotifications.discovery(c,id,"Comic updated: ${r.optString("name")}","${additions.size} new pages. Open Monitoring to download.")
-            if(pending.isNotEmpty() && (r.optBoolean("automatic") || r.optBoolean("download_pending") || (!baseline && r.optBoolean("initial_download")))) {
-                attempted=true
+            val selected=r.optJSONArray("retry_keys")?.let { keys -> (0 until keys.length()).map { keys.getString(it) }.toSet() }
+            val downloads=if(pending.isNotEmpty() && (r.optBoolean("automatic") || r.optBoolean("download_pending") || (!baseline && r.optBoolean("initial_download")))) {
+                // Refresh expiring locators by stable identity. A pending item missing from the
+                // source is kept for later, but isn't a transfer this check can announce.
+                val available=fresh.asReversed().associateBy(CollectionJournal::key)
+                pending.filterKeys { selected==null || it in selected }.mapNotNull { (key,original) ->
+                    available[key]?.let { original to it }
+                }
+            } else emptyList()
+            if(downloads.isNotEmpty()) {
                 val manager=c.getSystemService(NotificationManager::class.java)
                 manager.createNotificationChannel(NotificationChannel("comic_updates","Comic update downloads",NotificationManager.IMPORTANCE_LOW))
                 val notification=NotificationCompat.Builder(c,"comic_updates").setSmallIcon(R.drawable.ic_download).setContentTitle("Downloading comic updates").setContentText(r.optString("name"))
@@ -113,16 +122,14 @@ class ComicMonitorWorker(c: Context,p: WorkerParameters): Worker(c,p) {
                 CollectionJournal.discovered(c,journal,pending.values.toList())
                 val saved=r.optJSONObject("saved") ?: JSONObject()
                 var next=r.optInt("last_number",old.size)
-                val selected=r.optJSONArray("retry_keys")?.let { keys -> (0 until keys.length()).map { keys.getString(it) }.toSet() }
-                pending.values.toList().filter { selected==null || CollectionJournal.key(it) in selected }.forEach { original ->
+                downloads.forEach { (original,item) ->
                     if(isStopped) throw InterruptedException()
                     val key=CollectionJournal.key(original)
-                    // Refresh expiring locators by stable identity on every successful source check.
-                    val item=fresh.find { CollectionJournal.key(it)==key } ?: return@forEach
                     try {
+                        attempted=true
                         val numbered=item.copy(order=next+1)
                         val uri=CollectionTransferIO.write(c,numbered,r.optString("destination"),"yt-dlp Mobile/Collections/${CollectionTransferIO.safe(r.optString("name"))}",{isStopped}) { connection=it }
-                        saved.put(key,uri.toString());pending.remove(key);next++
+                        saved.put(key,uri.toString());pending.remove(key);next++;savedPages++
                         CollectionJournal.result(c,journal,original,"saved",uri=uri.toString())
                         check(ComicStore.mutate(c,id,generation) { it.put("pending",ComicStore.array(pending.values.toList())).put("saved",saved).put("last_number",next) }) { "Rule changed during download" }
                         event("page saved; number=$next; remaining=${pending.size}")
@@ -134,12 +141,16 @@ class ComicMonitorWorker(c: Context,p: WorkerParameters): Worker(c,p) {
             }
             val status="Comic check complete: ${fresh.size} source pages, ${pending.size} pending"
             ComicStore.mutate(c,id,generation) { it.put("download_pending",false).put("status",status);it.remove("retry_keys") }
-            CollectionJournal.finished(c,journal,status,log.toString(),attempted);return Result.success()
+            val completion=when {
+                savedPages > 0 -> "Saved $savedPages comic pages; ${pending.size} pending"
+                attempted -> "Could not save comic pages; ${pending.size} pending"
+                else -> status
+            }
+            CollectionJournal.finished(c,journal,completion,log.toString(),notify=attempted);return Result.success()
         } catch(e: Exception) {
             event("check failed; baseline/pending retained: ${e.message}")
             ComicStore.mutate(c,id,generation) { it.put("failures",it.optInt("failures")+1).put("recoveryKind",MonitoringFailure.kind(MonitoringStore.error(e))).put("status","Needs attention: ${MonitoringStore.safe(e.message.orEmpty())}") }
             if(journal.isNotBlank()) CollectionJournal.finished(c,journal,"Comic update needs attention; pending pages retained",log.toString(),false)
-            if(!r.optString("status").startsWith("Needs attention:")) MonitoringNotifications.discovery(c,"comic-rule:$id","Comic monitoring needs attention",r.optString("name")+" — open Monitoring")
             return if(isStopped) Result.retry() else Result.success()
         } finally {
             connection?.disconnect();CollectionLane.lock.unlock()

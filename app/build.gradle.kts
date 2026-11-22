@@ -11,8 +11,8 @@ android {
         applicationId = "com.linfranca.ytdlpmobile"
         minSdk = 29
         targetSdk = 35
-        versionCode = 133
-        versionName = "1.0.74"
+        versionCode = 146
+        versionName = "1.0.87"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -84,6 +84,7 @@ dependencies {
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
 
     implementation("org.jsoup:jsoup:1.18.3")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

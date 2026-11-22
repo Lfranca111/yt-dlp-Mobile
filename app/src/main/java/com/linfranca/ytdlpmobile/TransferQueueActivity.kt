@@ -75,9 +75,10 @@ class TransferQueueActivity : DisplayActivity() {
                 val retained=jobs.filter { it.optString("state") !in TransferRules.activeStates }.associate { it.getString("id") to TransferQueue.hasRetained(this,it.getString("id")) }
                 val recoverable=retained.filterValues { it }.keys.associateWith { PartialDownloadCache.recoverable(TransferQueue.workDirectory(this,it,"download")).isNotEmpty() }
                 val collections=CollectionJournal.jobs(this)
+                val posts=PostTextExport.history(this)
                 val limit=TransferSettings.limit(this);val paused=TransferQueue.paused(this)
                 val notifications=getSystemService(android.app.NotificationManager::class.java).areNotificationsEnabled()
-                val key=QueuePresentation.signature(jobs)+retained.toString()+recoverable.toString()+collections.toString()+limit+paused+notifications
+                val key=QueuePresentation.signature(jobs)+retained.toString()+recoverable.toString()+collections.toString()+posts.toString()+limit+paused+notifications
                 runOnUiThread {
                     loading=false
                     if(visible && !isFinishing && !isDestroyed) {
@@ -88,13 +89,13 @@ class TransferQueueActivity : DisplayActivity() {
                                 rowVisuals.style(label,id,j.optString("state"))
                             }
                             activeBars[id]?.apply { progress=j.optInt("progress").coerceIn(0,100);isIndeterminate=progress==0 }
-                        } else { signature=key;renderSnapshot(jobs,retained,recoverable,collections,limit,paused,notifications) }
+                        } else { signature=key;renderSnapshot(jobs,retained,recoverable,collections,posts,limit,paused,notifications) }
                     }
                 }
             } catch(e: Exception) { runOnUiThread { loading=false } }
         }
     }
-    private fun renderSnapshot(jobs: List<org.json.JSONObject>,retained: Map<String,Boolean>,recoverable: Map<String,Boolean>,collections: List<org.json.JSONObject>,limit: Int,paused: Boolean,notifications: Boolean) {
+    private fun renderSnapshot(jobs: List<org.json.JSONObject>,retained: Map<String,Boolean>,recoverable: Map<String,Boolean>,collections: List<org.json.JSONObject>,posts: List<PostTextExport.SavedPost>,limit: Int,paused: Boolean,notifications: Boolean) {
         activeLabels.clear();activeBars.clear()
         body.removeAllViews();text("Queue & history",27f)
         if(!notifications) text("Notifications are disabled in Android settings. Enable them for live-stream alerts and task results.")
@@ -104,11 +105,30 @@ class TransferQueueActivity : DisplayActivity() {
         jobs.firstOrNull { it.optString("state") in TransferRules.activeStates }?.let { button("Stop active task / save recording") { queueAction { TransferQueue.stop(this) } } }
         val active=jobs.filter { it.optString("state") in setOf("running","stopping","reserved","finalizing","queued","held") }
         val highlighted=jobs.find { it.optString("id")==intent.getStringExtra("highlight_job") }
-        (listOfNotNull(highlighted)+active+jobs.filterNot { it in active }.asReversed().take(100)).distinctBy { it.optString("id") }.forEach { j ->
+        val postsById=posts.associateBy { it.historyId }
+        val postRows=posts.map { post ->
+            org.json.JSONObject().put("id",post.historyId).put("title",post.name)
+                .put("state","saved").put("detail","Post export").put("finished",post.savedAt)
+        }
+        val history=(jobs.filterNot { it in active }.asReversed()+postRows)
+            .sortedByDescending { it.optLong("finished",it.optLong("created")) }
+            .take(100)
+        (listOfNotNull(highlighted)+active+history).distinctBy { it.optString("id") }.forEach { j ->
             val id=j.getString("id");val state=j.optString("state")
             val label=TextView(this).apply { text=QueuePresentation.label(j);textSize=19f;setPadding(0,12,0,8) }
             body.addView(label)
             rowVisuals.style(label,id,state)
+            postsById[id]?.let { post ->
+                button("Open saved file") {
+                    runCatching {
+                        startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(post.uri,post.mime)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                    }.onFailure {
+                        Toast.makeText(this,"Could not open this file. Check Downloads or install a viewer for this format.",Toast.LENGTH_LONG).show()
+                    }
+                }
+                return@forEach
+            }
             if(state in TransferRules.activeStates || state=="held") activeLabels[id]=label
             if(j.optString("fragment_sample_status").isNotBlank()) text(j.optString("fragment_sample_status"))
             if(j.optString("retained_recovery_status").isNotBlank()) text(j.optString("retained_recovery_status"))

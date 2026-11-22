@@ -47,6 +47,10 @@ class CollectionConvertActivity : DisplayActivity() {
     private var tree: Uri? = null
     private var directory: Uri? = null
     private var folderName = "Comic"
+    private var pendingPdf: Uri? = null
+    private var sourcePdf: Uri? = null
+    private var starting = false
+    private lateinit var appendPdf: MaterialButton
     private lateinit var status: TextView
     private lateinit var warning: TextView
     private lateinit var convert: MaterialButton
@@ -68,27 +72,66 @@ class CollectionConvertActivity : DisplayActivity() {
     }
     private val filePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { selected ->
         if (selected.isEmpty()) return@registerForActivityResult
-        val files = selected.mapNotNull { uri ->
+        prepareImages(selected, null)
+    }
+    private val pdfPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { chosen ->
+        if (chosen == null) return@registerForActivityResult
+        try {
+            contentResolver.takePersistableUriPermission(chosen, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            pendingPdf = chosen
+            appendImagePicker.launch(arrayOf("image/*"))
+        } catch (_: SecurityException) {
+            status.text = "Cannot read the selected PDF. Choose it again from a folder that allows access."
+        }
+    }
+    private val appendImagePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { selected ->
+        val pdf = pendingPdf
+        pendingPdf = null
+        if (pdf != null && selected.isNotEmpty()) prepareImages(selected, pdf)
+    }
+
+    private fun prepareImages(selected: List<Uri>, pdf: Uri?) {
+        val files = selected.distinct().mapNotNull { uri ->
             runCatching {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                val info = describe(uri)
-                info.takeIf { it.image }
+                describe(uri).takeIf { it.image }
             }.getOrNull()
         }
-        if (files.isEmpty()) { status.text = "No supported still images were selected."; return@registerForActivityResult }
+        if (files.isEmpty() || (pdf != null && files.size != selected.distinct().size)) {
+            status.text = "Choose readable still images."
+            return
+        }
+        sourcePdf = pdf
         pages.clear(); pages += ComicFiles.sorted(files)
         videos = emptyList()
         directory = null; tree = null
-        folderName = "Selected images"
+        folderName = if (pdf == null) "Selected images" else runCatching {
+            describe(pdf).name.replace(Regex("\\.pdf$", RegexOption.IGNORE_CASE), "").ifBlank { "Comic" }
+        }.getOrDefault("Comic")
         showPages()
-        status.text = "Choose a destination folder for the PDF. Only videos already in that folder can be linked."
+        status.text = if (pdf == null) "Choose a destination folder for the PDF. Only videos already in that folder can be linked."
+            else "Choose a folder for the updated copy. Choose the original folder to keep relative video links working."
         outputPicker.launch(null)
     }
     private val outputPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { chosen ->
-        if (chosen == null) { status.text = "Choose a destination folder to convert the selected files."; return@registerForActivityResult }
-        contentResolver.takePersistableUriPermission(chosen,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        if (chosen == null) {
+            status.text = if (sourcePdf != null) "Choose an output folder when ready to save the updated PDF."
+                else "Choose a destination folder to convert the selected files."
+            return@registerForActivityResult
+        }
+        try {
+            contentResolver.takePersistableUriPermission(chosen,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        } catch (_: SecurityException) {
+            status.text = "Cannot write to that folder. Choose another folder."
+            return@registerForActivityResult
+        }
         tree = chosen; directory = ComicFiles.root(chosen)
+        if (sourcePdf != null) {
+            showPages()
+            status.text = "Ready to append ${pages.size} image page(s) to $folderName. The original PDF will be kept."
+            return@registerForActivityResult
+        }
         val destinationFiles = try { ComicFiles.children(contentResolver, chosen, directory!!) }
         catch (error: Exception) { status.text = "Cannot list destination folder: ${error.message}"; directory = null; return@registerForActivityResult }
         videos = ComicFiles.sorted(destinationFiles.filter { it.video })
@@ -101,6 +144,16 @@ class CollectionConvertActivity : DisplayActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "Convert collection"
+        pendingPdf = savedInstanceState?.getString("pendingPdf")?.let(Uri::parse)
+        sourcePdf = savedInstanceState?.getString("sourcePdf")?.let(Uri::parse)
+        if (sourcePdf != null) {
+            folderName = savedInstanceState?.getString("appendName") ?: "Comic"
+            tree = savedInstanceState?.getString("appendTree")?.let(Uri::parse)
+            directory = savedInstanceState?.getString("appendDirectory")?.let(Uri::parse)
+            pages += savedInstanceState?.getStringArrayList("appendPages").orEmpty().mapNotNull {
+                runCatching { describe(Uri.parse(it)) }.getOrNull()
+            }
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(12))
@@ -114,13 +167,18 @@ class CollectionConvertActivity : DisplayActivity() {
         val choose = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         choose.addView(MaterialButton(this).apply {
             text = "Choose folder"
-            setOnClickListener { folderPicker.launch(null) }
+            setOnClickListener { if (!starting && !CollectionConvertState.running) folderPicker.launch(null) }
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         choose.addView(MaterialButton(this).apply {
             text = "Choose images"
-            setOnClickListener { filePicker.launch(arrayOf("image/*")) }
+            setOnClickListener { if (!starting && !CollectionConvertState.running) filePicker.launch(arrayOf("image/*")) }
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(choose)
+        appendPdf = MaterialButton(this).apply {
+            text = "Add images to existing PDF"
+            setOnClickListener { pdfPicker.launch(arrayOf("application/pdf")) }
+        }
+        root.addView(appendPdf)
         warning = TextView(this).apply { setPadding(0, dp(8), 0, dp(8)) }
         root.addView(warning)
         includeVideos = CheckBox(this).apply {
@@ -182,7 +240,9 @@ class CollectionConvertActivity : DisplayActivity() {
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         convert = MaterialButton(this).apply {
             text = "Make PDF"
-            setOnClickListener { startConversion() }
+            setOnClickListener {
+                if (sourcePdf != null && directory == null) outputPicker.launch(null) else startConversion()
+            }
         }
         cancel = MaterialButton(this).apply {
             text = "Cancel conversion"
@@ -201,7 +261,20 @@ class CollectionConvertActivity : DisplayActivity() {
             insets
         }
         ViewCompat.requestApplyInsets(root)
+        if (sourcePdf != null) showPages()
         renderProgress()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString("pendingPdf", pendingPdf?.toString())
+        sourcePdf?.let { pdf ->
+            outState.putString("sourcePdf", pdf.toString())
+            outState.putString("appendName", folderName)
+            outState.putString("appendTree", tree?.toString())
+            outState.putString("appendDirectory", directory?.toString())
+            outState.putStringArrayList("appendPages", ArrayList(pages.map { it.uri.toString() }))
+        }
     }
 
     private fun describe(uri: Uri): ComicFile {
@@ -225,6 +298,7 @@ class CollectionConvertActivity : DisplayActivity() {
                 if (index == 0) {
                     if (images.isEmpty()) { status.text = "This folder has no still images. Open a comic subfolder."; browseFolder(folder) }
                     else {
+                        sourcePdf = null
                         directory = folder
                         folderName = runCatching { describe(folder).name }.getOrDefault("Comic")
                         pages.clear(); pages += ComicFiles.restoreOrder(folder, images, prefs)
@@ -237,13 +311,18 @@ class CollectionConvertActivity : DisplayActivity() {
     }
 
     private fun showPages() {
-        embedVideos.isEnabled = includeVideos.isChecked && videos.isNotEmpty()
+        includeVideos.isEnabled = sourcePdf == null
+        embedVideos.isEnabled = sourcePdf == null && includeVideos.isChecked && videos.isNotEmpty()
         if (videos.isEmpty()) embedVideos.isChecked = false
         updateVideoSummary()
         adapter.notifyDataSetChanged()
         renderButtons()
     }
     private fun updateVideoSummary() {
+        if (sourcePdf != null) {
+            warning.text = "${pages.size} image page(s) to add to $folderName. Reorder below before saving. The original PDF stays unchanged."
+            return
+        }
         val mode = when {
             !includeVideos.isChecked -> "will not be included in the PDF"
             embedVideos.isChecked -> "will be embedded in the PDF"
@@ -252,10 +331,10 @@ class CollectionConvertActivity : DisplayActivity() {
         warning.text = ComicFiles.diagnostic(pages) + "\n${videos.size} video file(s) $mode."
     }
     private fun orderChanged() { adapter.notifyDataSetChanged(); saveOrder() }
-    private fun saveOrder() { ComicFiles.saveOrder(directory, pages, prefs) }
+    private fun saveOrder() { if (sourcePdf == null) ComicFiles.saveOrder(directory, pages, prefs) }
     private fun startConversion() {
         val target = directory ?: run { status.text = "Choose a destination folder first."; return }
-        if (pages.isEmpty() || CollectionConvertState.running) return
+        if (pages.isEmpty() || starting || CollectionConvertState.running) return
         saveOrder()
         try {
             // A comic may contain thousands of pages. Pass a private request file rather than
@@ -267,17 +346,27 @@ class CollectionConvertActivity : DisplayActivity() {
                 .put("embedVideos", includeVideos.isChecked && embedVideos.isChecked)
                 .put("videoUris", JSONArray().apply { if (includeVideos.isChecked && embedVideos.isChecked)
                     videos.forEach { put(it.uri.toString()) } })
+            sourcePdf?.let { payload.put("sourcePdf", it.toString()) }
             val request = File(filesDir, "comic-convert-${UUID.randomUUID()}.json")
             request.writeText(payload.toString())
             ContextCompat.startForegroundService(this, Intent(this, CollectionConvertService::class.java)
                 .setAction(CollectionConvertService.ACTION_START)
                 .putExtra(CollectionConvertService.EXTRA_REQUEST, request.name))
-            status.text = "Starting PDF conversion…"
+            starting = true
+            status.text = if (sourcePdf == null) "Starting PDF conversion…" else "Starting PDF update…"
             renderButtons()
         } catch (error: Exception) { status.text = "Cannot start conversion: ${error.message}" }
     }
     private fun renderButtons() {
-        if (::convert.isInitialized) convert.isEnabled = pages.isNotEmpty() && directory != null && !CollectionConvertState.running
+        if (::convert.isInitialized) {
+            convert.isEnabled = pages.isNotEmpty() && (directory != null || sourcePdf != null) && !starting && !CollectionConvertState.running
+            convert.text = when {
+                sourcePdf == null -> "Make PDF"
+                directory == null -> "Choose output folder"
+                else -> "Save updated PDF"
+            }
+        }
+        if (::appendPdf.isInitialized) appendPdf.isEnabled = !starting && !CollectionConvertState.running
         if (::cancel.isInitialized) cancel.isEnabled = CollectionConvertState.running
     }
     private fun renderProgress() {
@@ -288,6 +377,8 @@ class CollectionConvertActivity : DisplayActivity() {
     }
     private val progressReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            starting = false
+            status.text = CollectionConvertState.message
             renderProgress()
         }
     }

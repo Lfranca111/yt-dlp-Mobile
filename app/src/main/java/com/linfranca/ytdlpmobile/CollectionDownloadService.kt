@@ -119,7 +119,7 @@ class CollectionDownloadService : Service() {
                             continue
                         }
                         try {
-                            downloadWithRetry(item, name, targetFolder)
+                            downloadWithRetry(item, name, targetFolder, route.site)
                             CollectionState.pageProcessed++
                             CollectionState.saved++
                             update("Page $page: ${CollectionState.pageProcessed}/${CollectionState.pageTotal} • ${CollectionState.saved} saved",
@@ -172,15 +172,15 @@ class CollectionDownloadService : Service() {
         }, "collection-download").apply { start() }
     }
 
-    private fun downloadWithRetry(item: CollectionItem, name: String, folder: String) {
+    private fun downloadWithRetry(item: CollectionItem, name: String, folder: String, site: String) {
         var lastError: Exception? = null
         repeat(3) { attempt ->
             if (stopping.get()) throw InterruptedException()
             try {
                 try { download(item, name, folder) }
                 catch (error: MediaHttpError) {
-                    if (error.status == 404 && item.fallbackUrl.isNotBlank()) {
-                        update("Trying displayed image for $name…", "Original image unavailable; trying displayed image for $name.")
+                    if (item.fallbackUrl.isNotBlank() && CollectionImageQuality.canUsePrevious(site, error.status)) {
+                        update("Trying displayed image for $name…", "Preferred image unavailable (HTTP ${error.status}); trying displayed image for $name.")
                         download(item.copy(url = item.fallbackUrl), name, folder)
                     } else throw error
                 }

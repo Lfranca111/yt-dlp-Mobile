@@ -1,5 +1,119 @@
 # yt-dlp Mobile User Guide
 
+## 1.0.87 additions
+
+This section documents the accumulated **1.0.75–1.0.87** changes after 1.0.74. The earlier guide remains below. New instructions here apply to 1.0.87, while earlier version/test statements retain their original scope.
+
+- [Save a post as TXT or HTML](#save-a-post-as-txt-or-html)
+- [Review, select or paste post text](#review-select-or-paste-post-text)
+- [Post page support and limits](#post-page-support-and-limits)
+- [Find saved posts in history](#find-saved-posts-in-history)
+- [Browser popup handling](#browser-popup-handling)
+- [Collection images and quiet comic checks](#collection-images-and-quiet-comic-checks)
+- [Add images to an existing PDF](#add-images-to-an-existing-pdf)
+- [AstalaVR and recording changes](#astalavr-and-recording-changes)
+- [Troubleshooting the new features](#troubleshooting-the-new-features)
+
+### Save a post as TXT or HTML
+
+1. On **Main**, enter the full post/page URL and choose **Save post as text**.
+2. In the browser, open the intended full post. Complete sign-in or website prompts yourself.
+3. If the body is collapsed, tap the website's **More / See more** control to expose it.
+4. Tap **Save post** and choose **Plain text (.txt)** or **HTML copy (.html)**.
+5. When **Review selected text** appears, check the draft and press **Save** when it contains the intended text.
+6. Find the export in **Downloads/yt-dlp Mobile** or **Queue & history**.
+
+TXT contains the title and body with paragraph breaks. HTML creates an offline-readable text document with supported formatting and links. Images, video, subtitles, comments, recommendations and site controls are excluded from the intended text export. A post containing media can still have its authored text exported.
+
+Automatic capture can save a confidently identified body directly. A candidate requiring review opens the editor. An ambiguous page can leave you in selection mode so you can choose the text.
+
+### Review, select or paste post text
+
+When capture cannot identify the intended body, use the on-page selection flow. The status line asks you to tap or long press the post text and then use **Review selected text**.
+
+| Control | Action |
+| --- | --- |
+| Review selected text | Open the selected/candidate text in an editable draft |
+| Save | Export the text currently shown in the review editor |
+| Back to page | Dismiss the editor so you can select or expand text on the website |
+| Retry auto | Run automatic capture again on the current page |
+| Paste in the editor | Use Android's normal text-field Paste action for copied text |
+
+Dismiss the review dialog while selecting text on the page. Return to the page, expand the body if needed, select the intended text and reopen Review. On supported Facebook pages, expansion clears the old excerpt so a fresh review reads the expanded body.
+
+Navigating to another page invalidates the old capture. If saving fails, check storage and retry through the displayed editor error.
+
+### Post page support and limits
+
+| Page type | Expected behavior in 1.0.87 |
+| --- | --- |
+| Identifiable Reddit post | Capture the intended post's title/body, excluding comments. A share URL must resolve to the readable post. |
+| X/Twitter status detail | Prefer exact status identity and its owned body. Replies, quoted posts and nearby cards must not be mistaken for the intended body. |
+| X detail without a verified exact ID | Offer Review for one unambiguous, exposed and semantically scoped body. Multiple candidates can require manual selection. |
+| Facebook detail post | Scope capture to the intended visible detail card. Expanded text can include separate spans, mentions and paragraphs. |
+| Supported Facebook Reel detail | Offer Review for an authored caption associated with the exposed player. Video and subtitles are excluded. |
+| Compatible article/post page | Use an identifiable primary article/body. A homepage, feed, login page or ambiguous set of posts may need manual selection or may not be capturable. |
+
+Support depends on page structure, account state and current mobile layout. Complete prompts and press More or See more yourself. A caption without a verified relationship to the player, or text still awaiting expansion, can leave the draft empty.
+
+### Find saved posts in history
+
+TXT and HTML exports appear in **Queue & history** alongside completed media, sorted by save time. Tap **Open saved file** on the export's row. A compatible text or HTML viewer must be available.
+
+Version 1.0.79 stored export records without timestamps. Later versions try to recover their saved date from Android's media database. Older exports can have less precise ordering if their date cannot be recovered.
+
+Opening a history row depends on the file still being available. If it was moved or deleted, locate it in Downloads or save the post again.
+
+### Browser popup handling
+
+Browser Assist, monitoring browsers, custom-source setup and background monitoring rendering block website attempts to open additional windows/tabs. Navigation inside the current browser still works, including Back history.
+
+A link that relies entirely on an extra window can appear to do nothing. Use a direct page link or a same-window route exposed by the website. Popup blocking does not guarantee that every redirect or advertisement is removed.
+
+### Collection images and quiet comic checks
+
+Collections prefer a verified larger image alternative for the same page when the source exposes one. Page identity, filenames and order are retained, with fallback to the previous URL. Tailspace duplicate-preview handling avoids treating recognized preview variants as separate comic pages.
+
+Routine comic checks finding no new pages are quiet. New-page/download activity can still notify, and check results/errors remain in history or logs. Continue to review access failures and reordered/replaced-page warnings. These changes do not establish fixes for every previously reported comic-monitoring gap.
+
+### Add images to an existing PDF
+
+1. Open the comic/PDF conversion screen and choose **Add images to existing PDF**.
+2. Select the original PDF using Android's file picker.
+3. Select readable still images to add.
+4. Choose a destination folder for the updated copy.
+5. Review the image previews and reorder the additions as needed.
+6. Choose **Save updated PDF** and wait for saving to finish.
+
+The new images follow the existing pages. The append path imports existing pages without rasterizing/recompressing them. A separate updated copy is saved and the source PDF is kept.
+
+Choose the original folder when existing relative companion-video links need to keep working. Moving the result elsewhere can affect those links. Password-protected/encrypted, digitally signed and empty source PDFs are rejected.
+
+PDF appending is manual. Comic monitoring does not automatically rebuild an existing PDF.
+
+### AstalaVR and recording changes
+
+An eligible AstalaVR MP4 capture returning an initial 403 can use a ranged-transfer fallback with complete-byte verification. Reopen the page and play the video again if the capture expired. Website access can still fail.
+
+Mobile diagnostics include range/status/header-presence information with sensitive request values omitted. Record the action and error when reporting a failed fallback.
+
+**Stop & save** handles additional shutdown/export races, allows a short FFmpeg shutdown grace period, forces shutdown if required and checks output stability before export. Changing output can trigger a retry or retained recovery. Allow finalization to finish and inspect the saved result.
+
+### Troubleshooting the new features
+
+| Symptom | What to check |
+| --- | --- |
+| Save post cannot find visible text | Open the full detail page, expand it, then select the intended body and use Review. Capture diagnostics for the failing layout. |
+| Review contains suggestions or an excerpt | Go Back to page, select the correct body or expand it, then reopen Review. |
+| Cannot select behind a dialog | Use Back to page, select on the website, then press Review selected text. |
+| Facebook Reel review is empty | Load the supported detail page and expose its authored caption. An unowned caption cannot be prefilled. |
+| Saved HTML/TXT will not open | Check that the file still exists and a viewer is available. |
+| A website link stops opening | It may require a blocked extra window. Try a direct link or current-window route. |
+| Routine comic check has no notification | No-new-page checks are quiet. Read history for the result. |
+| PDF update is rejected | Check file access, encryption/password protection, signatures, page count, image access and destination permission. |
+
+Save-post diagnostics report capture reasons and article/body/match/candidate counts while omitting captured text and HTML. When reporting a failure, include app version, page type, expansion/selection steps and diagnostic output. Inspect other log content before sharing.
+
 This guide covers the **1.0.74 release target**. See the [changelog](../CHANGELOG.md#1074--release-target) for changes since 1.0.63. Website support depends on page type, current site behavior and the installed yt-dlp engine.
 
 ## Contents

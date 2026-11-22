@@ -35,7 +35,7 @@ internal object MonitoringBuiltinBrowser {
             val data=runCatching { JSONObject(s.room) }.getOrDefault(JSONObject())
             if(data.optBoolean("pending",true)) emptyList()
             else {
-                val evidence="${data.optInt("status")}:${data.optString("state")}:${data.optString("gate")}"
+                val evidence="${data.optInt("status")}:${data.optString("state")}:${data.optString("gate")}" 
                 if(evidence!=lastEvidence) {
                     lastEvidence=evidence
                     trace.event("api-response","status=${data.optInt("status")}; state=${data.optString("state").ifBlank { "unknown" }}; gate=${data.optString("gate").ifBlank { "not-identified" }}")

@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.0.87 — Release target
+
+Changes from **1.0.75 through 1.0.87**, consolidated for the update from **1.0.74**. The reviewed 1.0.87 source declares version code **146**. Earlier entries and their original validation records remain below.
+
+### Saving posts and reviewing text
+
+- Added Main's **Save post as text** workflow, initially for title/body TXT export and expanded to **Plain text (.txt)** and **HTML copy (.html)**. Exports go to **Downloads/yt-dlp Mobile**. HTML preserves supported basic formatting and links while excluding page scripts and embedded media.
+- Added persistent saved-post history and opening saved exports. Saved posts now share the completed-history timeline with media, sorted by saved time. Older post records can recover their save date from Android's media database.
+- Added exact-post matching for X, including supported status routes, body/author identity checks and handling for clickable post bodies or layouts missing an article wrapper.
+- Added a review path for a single exposed, semantically scoped X body when exact ID matching cannot be established. Ambiguous or unverified candidates require review rather than automatic saving.
+- Added manual text selection on the browser page and **Review selected text**. The editor supports checking/editing the draft, normal text-field Paste, **Back to page**, **Retry auto**, and explicit Save.
+- Added capture diagnostics with failure reasons and article/body/match/candidate counts. Captured text and HTML bodies are omitted from diagnostic summaries.
+- Added scoped Facebook detail-card matching to distinguish the intended visible post from suggestions. Expanded text can include separate spans, inline mentions and paragraph breaks. Expanding the post clears stale excerpt selections so review can read the current body again.
+- Added reviewable authored captions for supported Facebook Reel detail routes when the caption can be associated with the exposed player. A truncated, missing or unowned caption is not prefilled. Video, subtitles and neighboring Reels are excluded.
+- Reddit capture excludes comments and unrelated controls. The later 1.0.84–1.0.87 patches refine Save post, version metadata and associated diagnostics/fixtures.
+
+### Browser, downloads and recording
+
+- Blocked website requests to create new windows/tabs in Browser Assist, monitoring browsers, custom-source teaching and background monitoring rendering. Current-window navigation continues. Popup-block events have diagnostic entries.
+- Added AstalaVR's eligible verified-MP4 ranged fallback after a 403 response, complete-byte checks and sanitized mobile range/status/header diagnostics.
+- Improved **Stop & save** handling for shutdown races, a short FFmpeg shutdown grace period followed by forced stop when required, stability checks before export, retry after output changes and retained recovery when saving cannot safely finish.
+
+### Collections, monitoring and PDFs
+
+- Improved collection image selection to prefer larger alternatives belonging to the same page, retain identifiers/filenames/order and use the prior URL as a fallback.
+- Improved Tailspace duplicate-preview handling. The recorded 1.0.76 check retained the expected order for a 69-page collection. Broader comic-monitoring gaps discussed at that time were left for separate work.
+- Made routine no-new-page comic-monitoring notifications quiet while retaining new-page/download alerts and recorded check/error information.
+- Added **Add images to existing PDF**, selection and reordering of new images, and **Save updated PDF** to write a separate copy. Existing pages are imported from the source document rather than rasterized again.
+- Added PdfBox-Android **2.0.27.0** for PDF appending and a corresponding dependency-notice entry in the source patch. Encrypted/password-protected, digitally signed and empty source PDFs are rejected.
+
+### Included development versions
+
+| Version | Addition or refinement |
+| --- | --- |
+| 1.0.75 | AstalaVR MP4/range recovery diagnostics and Stop & save reliability |
+| 1.0.76 | Larger same-page collection images and Tailspace preview handling |
+| 1.0.77 | Main Save post as text and initial post-body extraction |
+| 1.0.78 | TXT/HTML format choice and quiet no-new-page comic checks |
+| 1.0.79 | Persistent saved-post records and opening saved exports |
+| 1.0.80 | Saved posts integrated into dated Queue & history entries |
+| 1.0.81 | X post identity matching and broader identifiable article/post extraction |
+| 1.0.82 | Appending image pages to existing PDFs |
+| 1.0.83 | Website new-window/tab blocking across embedded-browser routes |
+| 1.0.84 | Manual selection/review fallback for Save post |
+| 1.0.85 | Clickable/unwrapped post bodies, selection flow and capture diagnostics |
+| 1.0.86 | Rendered X fallback, Facebook detail matching and review refinements |
+| 1.0.87 | Expanded Facebook bodies, Reel-caption review, stale-excerpt clearing and scoped X review fallback |
+
+### Validation and remaining limits
+
+- Historical focused checks recorded 13 passing tests for 1.0.75, 11 for 1.0.76, six extraction checks for 1.0.77, source/XML/JavaScript checks for 1.0.78 and 17 simulated checks for 1.0.85. These counts describe individual development revisions.
+- Later patches include JVM extraction fixtures and a Python browser fixture runner that exercises production capture/selection JavaScript in Chromium using intercepted pages. Their presence does not establish a passing full Android build or phone test for the final 1.0.87 APK.
+- User reports continued to show Save post failures on real mobile layouts during these revisions. Automatic capture remains dependent on a readable, identifiable page. Check the review draft and use diagnostics for a failed case.
+- The earlier AniWaves report is not established as fixed by these patches. Earlier access, HTTP 403 and validation caveats still apply where a documented result has not resolved them.
+- Final signed-APK and device tests for export, popup handling, recording, collections and PDF updates require results for that exact build.
+
 ## 1.0.74 — Release target
 
 Changes since public release **1.0.63**, consolidated into one release entry. This entry describes the source for the next public build; it does not certify an APK or indicate that a GitHub release has been published.

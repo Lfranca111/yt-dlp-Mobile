@@ -44,6 +44,7 @@ class CollectionConvertService : Service() {
         val payload = try { JSONObject(request.readText()) }
         catch (error: Exception) { request.delete(); return }
         val destination = Uri.parse(payload.getString("folder"))
+        val sourcePdf = payload.optString("sourcePdf").takeIf { it.isNotBlank() }?.let(Uri::parse)
         val imageArray = payload.getJSONArray("images")
         val images = (0 until imageArray.length()).map { Uri.parse(imageArray.getString(it)) }
         val videoArray = payload.getJSONArray("videos")
@@ -59,14 +60,15 @@ class CollectionConvertService : Service() {
             if (embedVideos) Uri.parse(videoUris!!.getString(index)) else null) }
         val title = payload.optString("title")
             .replace(Regex("[\\x00-\\x1F/\\\\]"), "_").trim().take(90).ifEmpty { "Comic" }
-        if (images.isEmpty()) { request.delete(); return }
+        if (images.isEmpty()) { request.delete(); stopSelf(); return }
+        val suggestedName = if (sourcePdf == null) "$title.pdf" else "$title - updated.pdf"
         stopped.set(false)
         CollectionConvertState.running = true
         CollectionConvertState.total = images.size + if (embedVideos) videos.size else 0
         CollectionConvertState.done = 0
         try {
             createChannel()
-            startForeground(NOTIFICATION_ID, notification("Creating $title.pdf"))
+            startForeground(NOTIFICATION_ID, notification(if (sourcePdf == null) "Creating $suggestedName" else "Updating $title"))
         } catch (error: Exception) {
             request.delete()
             CollectionConvertState.running = false
@@ -78,39 +80,84 @@ class CollectionConvertService : Service() {
         update("Preparing PDF: 0/${images.size} pages")
         worker = Thread({
             var outputUri: Uri? = null
+            var stagedPdf: File? = null
             try {
                 val inputs=images+if(embedVideos) (0 until (videoUris?.length() ?: 0)).map { Uri.parse(videoUris!!.getString(it)) } else emptyList()
-                val knownBytes=inputs.fold(0L) { total,uri ->
+                val knownBytes=(inputs + listOfNotNull(sourcePdf)).fold(0L) { total,uri ->
                     val bytes=runCatching { contentResolver.query(uri,arrayOf(android.provider.OpenableColumns.SIZE),null,null,null)?.use { if(it.moveToFirst() && !it.isNull(0)) it.getLong(0) else 0L } ?: 0L }.getOrDefault(0)
                     if(bytes>0 && total<=Long.MAX_VALUE-bytes) total+bytes else total
                 }
                 StorageGuard.destination(this,knownBytes,destination)
-                outputUri = DocumentsContract.createDocument(contentResolver, destination,
-                    "application/pdf", "$title.pdf") ?: error("Cannot create a PDF in the selected folder.")
-                contentResolver.openOutputStream(outputUri!!, "w")?.use { output ->
-                    ComicPdfWriter(contentResolver).write(output, images, videoFiles, { stopped.get() }) { completed ->
-                        if (stopped.get()) throw InterruptedException("PDF conversion cancelled.")
+                val totalPages: Int
+                if (sourcePdf != null) {
+                    StorageGuard.working(this, knownBytes, "updating PDF")
+                    val temp = File.createTempFile("comic-updated-", ".pdf", cacheDir)
+                    stagedPdf = temp
+                    totalPages = ComicPdfAppender(this).write(sourcePdf, images, temp, { stopped.get() }, { completed ->
                         CollectionConvertState.done = completed
-                        update(if (embedVideos && completed >= images.size)
-                            "Embedding videos: ${completed - images.size}/${videos.size} files"
-                            else "Creating PDF: $completed/${images.size} pages")
-                    }
-                } ?: error("Cannot open the new PDF for writing.")
+                        update("Preparing new image pages: $completed/${images.size}")
+                    }, { update("Writing updated PDF…") })
+                    if (stopped.get()) throw InterruptedException()
+                    StorageGuard.destination(this, temp.length(), destination)
+                    val copy = DocumentsContract.createDocument(contentResolver, destination, "application/pdf", suggestedName)
+                        ?: error("Cannot create the updated PDF in the selected folder.")
+                    val sameDocument = copy == sourcePdf || (copy.authority == sourcePdf.authority && runCatching {
+                        DocumentsContract.getDocumentId(copy) == DocumentsContract.getDocumentId(sourcePdf)
+                    }.getOrDefault(false))
+                    check(!sameDocument) { "The destination did not create a separate PDF. Choose a different folder." }
+                    outputUri = copy
+                    update("Saving updated copy…")
+                    contentResolver.openOutputStream(outputUri!!, "w")?.use { output ->
+                        temp.inputStream().use { input ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                if (stopped.get()) throw InterruptedException()
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                output.write(buffer, 0, count)
+                            }
+                        }
+                    } ?: error("Cannot open the updated copy for writing.")
+                } else {
+                    totalPages = images.size
+                    outputUri = DocumentsContract.createDocument(contentResolver, destination,
+                        "application/pdf", suggestedName) ?: error("Cannot create a PDF in the selected folder.")
+                    contentResolver.openOutputStream(outputUri!!, "w")?.use { output ->
+                        ComicPdfWriter(contentResolver).write(output, images, videoFiles, { stopped.get() }) { completed ->
+                            if (stopped.get()) throw InterruptedException("PDF conversion cancelled.")
+                            CollectionConvertState.done = completed
+                            update(if (embedVideos && completed >= images.size)
+                                "Embedding videos: ${completed - images.size}/${videos.size} files"
+                                else "Creating PDF: $completed/${images.size} pages")
+                        }
+                    } ?: error("Cannot open the new PDF for writing.")
+                }
                 if (stopped.get()) throw InterruptedException("PDF conversion cancelled.")
                 val name = runCatching {
                     contentResolver.query(outputUri!!, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
                         null, null, null)?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
-                }.getOrNull() ?: "$title.pdf"
+                }.getOrNull() ?: suggestedName
                 outputUri = null // Only a fully closed, valid PDF is retained.
-                update("Saved $name: ${images.size} pages; ${videos.size} " +
-                    (if (embedVideos) "embedded video attachments" else "video links") + ". Originals kept.")
+                if (sourcePdf != null) {
+                    update("Saved $name: appended ${images.size} image page(s), $totalPages pages total. Original PDF kept.")
+                } else {
+                    update("Saved $name: ${images.size} pages; ${videos.size} " +
+                        (if (embedVideos) "embedded video attachments" else "video links") + ". Originals kept.")
+                }
             } catch (_: InterruptedException) {
                 update("Conversion cancelled; incomplete PDF removed. Originals kept.")
             } catch (error: Exception) {
-                update(if(StorageGuard.failure(error)) "Not enough storage space for the PDF. Free space and convert again. Original images and videos are kept."
-                    else "PDF conversion failed at page ${CollectionConvertState.done + 1}: ${error.message}")
+                update(when {
+                    stopped.get() -> "Conversion cancelled; incomplete PDF removed. Originals kept."
+                    StorageGuard.failure(error) -> if (sourcePdf != null)
+                        "Not enough storage space for the updated PDF. Free space and try again. Original PDF kept."
+                    else "Not enough storage space for the PDF. Free space and convert again. Original images and videos are kept."
+                    sourcePdf != null -> "Could not update PDF: ${error.message ?: "Unable to read or write the PDF."} Original PDF kept."
+                    else -> "PDF conversion failed at page ${CollectionConvertState.done + 1}: ${error.message}"
+                })
             } finally {
                 request.delete()
+                stagedPdf?.delete()
                 outputUri?.let { runCatching { DocumentsContract.deleteDocument(contentResolver, it) } }
                 CollectionConvertState.running = false
                 broadcast()

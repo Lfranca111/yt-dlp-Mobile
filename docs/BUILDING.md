@@ -1,5 +1,63 @@
 # Building yt-dlp Mobile
 
+## 1.0.87 release additions
+
+This section applies to **1.0.87**, consolidating **1.0.75–1.0.87** over **1.0.74**. The earlier build notes remain below as their original snapshot. The reviewed 1.0.87 application Gradle file declares the following release values.
+
+~~~kotlin
+versionCode = 146
+versionName = "1.0.87"
+~~~
+
+### Source patch sequence and documentation placement
+
+Start with a complete 1.0.74 checkout and merge each applicable changed-files patch in order through 1.0.87, or use a complete checkout already containing those changes. The 1.0.87 patch is incremental over 1.0.86. The latest reviewed package is **yt-dlp-Mobile-v1.0.87-changed-files-from-v1.0.86(2).zip**, whose notes specify the strict 1.0.86 base. Changing only the version fields does not add earlier source changes.
+
+The sequence adds recording/AstalaVR changes, larger collection images, Save post/export history, X/Facebook text selection, PDF appending and popup blocking. Keep all new classes, assets and dependencies when merging.
+
+Merge this documentation package at the repository root.
+
+| File | Repository location |
+| --- | --- |
+| README.md | README.md |
+| CHANGELOG.md | CHANGELOG.md |
+| USER_GUIDE.md | docs/USER_GUIDE.md |
+| BUILDING.md | docs/BUILDING.md |
+
+New release sections appear before the existing paragraphs, feature tables and historical examples. Follow the 1.0.87 values above for the current release.
+
+### New dependency and runtime assets
+
+The PDF append feature adds this application dependency.
+
+~~~kotlin
+implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+~~~
+
+Keep **ComicPdfAppender.kt**, the updated conversion activity/service and the PdfBox dependency together. The 1.0.82 source patch also contains an updated **THIRD_PARTY_NOTICES.md** with the PdfBox entry. Retain it when merging the source patch.
+
+Save post requires the updated **PostTextContent.kt**, **PostTextExport.kt**, **BrowserSessionActivity.kt**, Main controls and **TransferQueueActivity.kt**. The later review/selection flow requires **app/src/main/assets/post-text-selection.js**. Verify that the asset is packaged in the APK.
+
+Popup blocking also updates **MonitoringBrowserSessionActivity.kt**, **CustomSourceActivity.kt** and **MonitoringPageRenderer.kt**. Apply the entire patch set so all embedded-browser routes receive it.
+
+### Verification for the new release
+
+Run the Gradle checks described below on the fully merged 1.0.87 project. Inspect the signing identity, version, required assets and native libraries in the exact APK intended for distribution.
+
+The patches include JVM extraction fixtures such as **PostSiteSupportTest**, **PostManualFallbackTest** and **PostClickableBodyTest**. Include them in the normal unit suite when present.
+
+The later patches supply a browser fixture runner requiring Python Playwright and Chromium. It exercises production capture/selection JavaScript using intercepted fixture HTML.
+
+~~~bash
+python tests/post-text-browser-fixtures.py
+~~~
+
+The runner uses **CHROMIUM** when set, otherwise **/usr/bin/chromium**. Passing these fixtures checks their specific assertions rather than every live site layout/account state.
+
+On a device, test TXT/HTML saving and opening from history, expanded Facebook text, Reel-caption review, X identity matching/manual review, page selection with the editor dismissed, popup blocking, recording through Stop & save, collection page order and PDF appending to a copy.
+
+Historical focused test counts are recorded in the [1.0.87 changelog](../CHANGELOG.md#1087--release-target). This documentation-only update adds no new full-build, lint, signed-APK or end-to-end mobile validation result. The earlier 1.0.71/1.0.74 test statements below retain their original scope.
+
 This guide covers the **1.0.74 release target**, following the 1.0.63 public baseline. Use the checked-in Gradle configuration as the authority for exact versions.
 
 ## Required project files

@@ -223,26 +223,15 @@ class MonitoringBrowserSessionActivity : DisplayActivity() {
             }
             return true
         }
+        // Keep multi-window dispatch enabled so target=_blank cannot replace the main page.
+        binding.webView.settings.javaScriptCanOpenWindowsAutomatically = false
         binding.webView.settings.setSupportMultipleWindows(true)
-        binding.webView.webChromeClient=object: android.webkit.WebChromeClient() {
-            override fun onCreateWindow(view: WebView?,dialog: Boolean,userGesture: Boolean,message: android.os.Message?): Boolean {
-                // Fold explicit popup navigation into the existing history. Block unsolicited popups.
-                if(!userGesture || message==null) return false
-                val popup=WebView(this@MonitoringBrowserSessionActivity)
-                popup.webViewClient=object: WebViewClient() {
-                    override fun shouldOverrideUrlLoading(v: WebView?,request: WebResourceRequest?): Boolean {
-                        if(request?.isForMainFrame != true) return true
-                        if(!handleAppLink(request) && BrowserWebNavigation.isWebScheme(request.url.scheme)) {
-                            appLinkBlocked = false
-                            binding.webView.loadUrl(browserNavigation.open(request.url.toString()))
-                        }
-                        binding.webView.post { popup.destroy() }
-                        return true
-                    }
-                }
-                (message.obj as? WebView.WebViewTransport)?.webView=popup
-                message.sendToTarget()
-                return true
+        binding.webView.webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onCreateWindow(view: WebView?, dialog: Boolean, userGesture: Boolean,
+                                        message: android.os.Message?): Boolean {
+                MonitoringStore.log(this@MonitoringBrowserSessionActivity,
+                    "Browser popup blocked; userGesture=$userGesture; dialog=$dialog; historyAvailable=${binding.webView.canGoBack()}; URL values omitted")
+                return false
             }
         }
         if(mode==MODE_DOWNLOAD) downloadDiscovery=BrowserDownloadDiscovery(this,binding.webView,pageUrl,

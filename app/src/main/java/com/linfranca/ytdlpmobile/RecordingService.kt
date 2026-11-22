@@ -41,8 +41,9 @@ import java.util.concurrent.atomic.AtomicReference
 
 internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaTaskEngine(owner,taskId,false) {
     private val executor = Executors.newSingleThreadExecutor()
-    private var processId: String? = null
+    @Volatile private var processId: String? = null
     @Volatile private var pairedProcess: Process? = null
+    private var captureWriterUnconfirmed = false
     @Volatile private var activeFinalizer: Process? = null
     @Volatile private var finalizationSkipRequested = false
     @Volatile private var liveRelay: LiveHlsRelay? = null
@@ -216,6 +217,7 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
         saveWhenStopped = false
         discardWhenStopped = false
         stopWasRequested = false
+        captureWriterUnconfirmed = false
         taskState.recording403RecoveryAvailable = false
         recordedMediaSeconds = 0L
         mediaProgressSeen = false
@@ -463,9 +465,18 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                 }
             } finally {
                 directCaptureActive=false
+                val writer = pairedProcess
+                if (writer?.isAlive == true) {
+                    writer.destroyForcibly()
+                    captureWriterUnconfirmed = !runCatching {
+                        writer.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)
+                    }.getOrDefault(false)
+                }
+                if (captureWriterUnconfirmed) recordSafeEvent("Recording writer still active; export skipped; capture retained")
+                else if (stopWasRequested) recordSafeEvent("Capture stopped; preparing local recording for save")
                 completionMonitor?.close();completionMonitor=null
                 File(folder, "page-access-cookies.txt").delete()
-                if (mouflonCapture && !discardWhenStopped && output.isFile && output.length() > 0L) {
+                if (!captureWriterUnconfirmed && mouflonCapture && !discardWhenStopped && output.isFile && output.length() > 0L) {
                     runCatching { FragmentedMp4Recovery.trimIncompleteTail(output) }
                         .onSuccess { recordSafeEvent("mouflon_mp4_finalization; complete fragments retained; incomplete/trailing bytes removed=$it") }
                         .onFailure { recordSafeEvent("mouflon_mp4_finalization_failed; error type=${it.javaClass.simpleName}") }
@@ -475,7 +486,7 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                 pairedProcess = null
                 if (captureStoppedAt == 0L) captureStoppedAt = SystemClock.elapsedRealtime()
                 val elapsed = (captureStoppedAt - startedAt).coerceAtLeast(0L) / 1_000L
-                savedPacketTiming = TransportStreamTiming.inspect(output)
+                savedPacketTiming = if (captureWriterUnconfirmed) null else TransportStreamTiming.inspect(output)
                 val savedSpan = savedPacketTiming?.video?.spanSeconds()
                 val durationNote = if (savedSpan != null) "\nSaved video packet span: ${String.format(Locale.ROOT, "%.3f", savedSpan)}s (timestamp estimate; excludes final frame duration)." else ""
                 val timing = if (mediaProgressSeen) {
@@ -493,18 +504,14 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                             "\nCould not export HTTP event log: ${it.message}").takeLast(MAX_LOG_CHARS) }
                 }
                 detailedLogFile = null
-                val source = RecordingMedia.choose(folder, stopWasRequested, allowFragmentedMp4 = mouflonCapture)
+                val source = if (captureWriterUnconfirmed) null else RecordingMedia.choose(folder, stopWasRequested, allowFragmentedMp4 = mouflonCapture)
                 when {
+                    captureWriterUnconfirmed -> finish("Recorder shutdown was not confirmed. Capture retained for recovery.", taskState.log)
                     discardWhenStopped -> finish("Recording discarded", taskState.log)
                     saveWhenStopped && source != null -> {
                         val audioPresent = recordedAudioPresent(source.file)
-                        val truncatedTs = stopWasRequested && source.extension == "ts" && source.file.length() % 188L != 0L
-                        val tail = if (truncatedTs) runCatching { RecordingTsTail.plan(source.file) }.getOrNull() else null
-                        if (truncatedTs) recordSafeEvent(if (tail != null)
-                            "Interrupted TS export: omitting ${tail.sourceBytes - tail.exportBytes()} bytes from incomplete trailing media."
-                        else "Interrupted TS has an unaligned tail; a conservative repair could not be verified.")
-                        runCatching { export(source, tail) }
-                            .onSuccess {
+                        runCatching { saveCapturedRecording(source) }
+                            .onSuccess { tailWarning ->
                                 val partial = mediaProgressSeen && elapsed > 30L &&
                                     recordedMediaSeconds + 10L < elapsed / 2L
                                 val status = if (partial) {
@@ -533,7 +540,6 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                                             .takeLast(MAX_LOG_CHARS)
                                     }
                                 }
-                                val tailWarning = if (truncatedTs && tail == null) " • recording end may be incomplete" else ""
                                 finish(status + (if (audioFinalizationBypassed) " • audio alignment incomplete" else "") + tailWarning,
                                     taskState.log + "\nSaved ${source.extension} recording; " +
                                     when (audioPresent) {
@@ -542,7 +548,10 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                                         null -> "audio could not be verified"
                                     })
                             }
-                            .onFailure { finish("Could not save recording: ${it.message}", taskState.log + "\n" + it.message) }
+                            .onFailure {
+                                val hint = if (it is RecordingSaveGuard.Changed) " Capture retained for recovery." else ""
+                                finish("Could not save recording: ${it.message}$hint", taskState.log + "\n" + it.message + hint)
+                            }
                     }
                     else -> {
                         val files = folder.walkTopDown().filter(File::isFile)
@@ -551,7 +560,7 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                             taskState.log + "\nRecorder files after stop: " + files)
                     }
                 }
-                if(discardWhenStopped || transferStatus.startsWith("Recording saved") || transferStatus.startsWith("Partial recording saved")) folder.deleteRecursively()
+                if (!captureWriterUnconfirmed && (discardWhenStopped || transferStatus.startsWith("Recording saved") || transferStatus.startsWith("Partial recording saved"))) folder.deleteRecursively()
                 else recordSafeEvent("Capture retained in private recovery storage; use Save recovered recording in Queue & history")
                 storageWatch=null
                 sessionDir = null
@@ -844,8 +853,10 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
             else options.addAll(listOf("-c", "copy", "-f", "mpegts", output.absolutePath))
             val command = mutableListOf(binary.absolutePath).apply { addAll(options) }
             val builder = ProcessBuilder(command).also(::configure)
+            if (stopWasRequested) return
             val process = builder.start()
             pairedProcess = process
+            if (stopWasRequested) requestPairedStop(process)
             outputStalledSince = 0L
             lastStallUserActionAt = 0L
             val trace = PairedCaptureTrace(SystemClock.elapsedRealtime())
@@ -1016,6 +1027,13 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                 trace.observeBytes(output.length(), SystemClock.elapsedRealtime())
                 taskState.log = (taskState.log + "\n" +
                     trace.summary(SystemClock.elapsedRealtime())).takeLast(MAX_LOG_CHARS)
+            }
+            if (stopWasRequested && !process.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                if (!process.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                    captureWriterUnconfirmed = true
+                    error("Recorder shutdown was not confirmed")
+                }
             }
             val exit = process.waitFor()
             if(relay?.sourceEnded()==true) {
@@ -1231,12 +1249,28 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                 return
             }
         }
-        update(if (save) "Stopping and finalizing recording…" else "Canceling recording…")
-        processId?.let(YoutubeDL::destroyProcessById)
-        pairedProcess?.let { process ->
-            process.destroy()
-            android.os.Handler(mainLooper).postDelayed({ if (process.isAlive) process.destroyForcibly() }, 3_000)
+        update(if (save) "Stopping recording…" else "Canceling recording…")
+        pairedProcess?.let(::requestPairedStop)
+        if (!alreadyStopping) {
+            val relay = liveRelay
+            val monitor = completionMonitor
+            Thread({
+                runCatching { relay?.stopFetching() }
+                runCatching {
+                    RecordingStopSignal.cancelWhenRegistered(
+                        { processId }, { id -> runCatching { YoutubeDL.destroyProcessById(id) }.getOrDefault(false) },
+                        { stopWasRequested && taskState.running && pairedProcess == null }, 3_000, 100
+                    )
+                }
+                runCatching { monitor?.close() }
+            }, "recording-stop").start()
         }
+    }
+
+    private fun requestPairedStop(process: Process) {
+        val handler = android.os.Handler(mainLooper)
+        RecordingStopSignal.stopPaired(process, { force -> handler.postDelayed(force, 3_000) },
+            { recordSafeEvent("Recorder stop grace period ended; forced capture process to exit") })
     }
 
     private fun renewStream(intent: Intent) {
@@ -1303,6 +1337,7 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
     }
 
     private fun recordingStatus(folder: File): String {
+        if (stopWasRequested) return if (discardWhenStopped) "Canceling recording…" else "Stopping recording…"
         if(!stopWasRequested && !discardWhenStopped) try { storageWatch?.poll() } catch(e: InsufficientStorage) {
             recordSafeEvent(StorageGuard.MESSAGE)
             stopRecording(save=true)
@@ -1358,7 +1393,21 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
         } finally { extractor.release() }
     }.getOrNull()
 
-    private fun export(candidate: RecordingMedia.Candidate, tail: RecordingTsTail.Plan? = null): Uri {
+    private fun saveCapturedRecording(candidate: RecordingMedia.Candidate): String =
+        RecordingSaveGuard.export(candidate.file, stopWasRequested,
+            { recordSafeEvent("Recording changed during finalization; retrying save once from a fresh snapshot") }
+        ) { snapshot ->
+            val truncatedTs = stopWasRequested && candidate.extension == "ts" && snapshot.bytes % 188L != 0L
+            val tail = if (truncatedTs) runCatching { RecordingTsTail.plan(candidate.file) }.getOrNull() else null
+            snapshot.verify(candidate.file)
+            if (truncatedTs) recordSafeEvent(if (tail != null)
+                "Interrupted TS export: omitting ${tail.sourceBytes - tail.exportBytes()} bytes from incomplete trailing media."
+            else "Interrupted TS has an unaligned tail; a conservative repair could not be verified.")
+            export(candidate, tail, snapshot)
+            if (truncatedTs && tail == null) " • recording end may be incomplete" else ""
+        }
+
+    private fun export(candidate: RecordingMedia.Candidate, tail: RecordingTsTail.Plan?, snapshot: RecordingSaveGuard.Snapshot): Uri {
         val source = candidate.file
         val extension = candidate.extension
         val displayName = source.name.substringBefore('.') + "." + extension
@@ -1377,8 +1426,9 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
         val uri = contentResolver.insert(collection, values) ?: error("Android could not create the recording.")
         try {
             contentResolver.openOutputStream(uri, "w")!!.use { output ->
-                copyRecordingWithProgress(source, output, tail)
+                copyRecordingWithProgress(source, output, tail, snapshot)
             }
+            snapshot.verify(source)
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             contentResolver.update(uri, values, null, null)
@@ -1485,9 +1535,11 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
         buildMap { value.keys().forEach { key -> value.optString(key).takeIf(String::isNotBlank)?.let { put(key, it) } } }
     }.getOrDefault(emptyMap())
 
-    private fun copyRecordingWithProgress(source: File, target: java.io.OutputStream, tail: RecordingTsTail.Plan? = null) {
-        if (tail != null) check(source.length() == tail.sourceBytes) { "Recording changed during finalization" }
-        val total = (tail?.exportBytes() ?: source.length()).coerceAtLeast(1L)
+    private fun copyRecordingWithProgress(source: File, target: java.io.OutputStream, tail: RecordingTsTail.Plan? = null,
+                                          snapshot: RecordingSaveGuard.Snapshot? = null) {
+        snapshot?.verify(source)
+        if (tail != null && tail.sourceBytes != snapshot?.bytes) throw RecordingSaveGuard.Changed()
+        val total = (tail?.exportBytes() ?: snapshot?.bytes ?: source.length()).coerceAtLeast(1L)
         StorageGuard.destination(this,total)
         val storage=StorageGuard.Watch(this)
         val base = if (audioFinalizationCompleted || taskState.progress > 1) 80 else 1
@@ -1500,11 +1552,11 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
         FileInputStream(source).use { input ->
             val buffer = ByteArray(256 * 1024)
             while (true) {
-                val remaining = tail?.let { it.prefixBytes - copied }
+                val remaining = (tail?.prefixBytes ?: snapshot?.bytes)?.minus(copied)
                 if (remaining == 0L) break
                 val count = input.read(buffer, 0, remaining?.coerceAtMost(buffer.size.toLong())?.toInt() ?: buffer.size)
                 if (count < 0) {
-                    check(tail == null) { "Recording ended while copying the verified prefix" }
+                    if (remaining != null) throw RecordingSaveGuard.Changed()
                     break
                 }
                 storage.poll()
@@ -1523,8 +1575,8 @@ internal class RecordingEngine(owner: MediaTaskService, taskId: String) : MediaT
                 }
             }
         }
+        snapshot?.verify(source)
         if (tail != null) {
-            check(source.length() == tail.sourceBytes) { "Recording changed during finalization" }
             storage.poll()
             target.write(tail.suffix)
         }

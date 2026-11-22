@@ -1,4 +1,5 @@
 <resources>
+    <string name="save_post_text">Save post</string>
     <string name="app_name">yt-dlp Mobile</string>
     <string name="url_hint">Video or playlist link</string>
     <string name="custom_hint">Extra yt-dlp arguments (optional)</string>

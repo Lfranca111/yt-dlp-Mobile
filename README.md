@@ -1,5 +1,21 @@
 # yt-dlp-Mobile
 
+## 1.0.87 update
+
+The current documentation target is **1.0.87**, consolidating the additions from **1.0.75 through 1.0.87** after the 1.0.74 baseline. The earlier descriptions below retain their original release context. See the [1.0.87 changelog](CHANGELOG.md#1087--release-target) and [new User Guide instructions](docs/USER_GUIDE.md#1087-additions).
+
+- **Save post as text** on Main opens a browser for exporting a readable post as **Plain text (.txt)** or **HTML copy (.html)**. Exports include the title and body. HTML keeps supported basic formatting and links for offline reading.
+- Save post supports identifiable Reddit posts, X posts, compatible article/post pages and scoped Facebook detail posts. Supported Facebook Reel detail pages can supply an authored caption for review. The exported file contains text rather than the post's images or video.
+- **Review selected text** lets you check or edit a draft, paste copied text, go **Back to page**, or **Retry auto**. Expand **More / See more** yourself before saving a truncated post. Selection happens on the page with the review dialog dismissed.
+- Saved TXT/HTML exports appear alongside completed media in **Queue & history**, ordered by saved time, with **Open saved file**. Existing saved-post history is migrated where a save date can be recovered.
+- Browser Assist, monitoring browsers, custom-source setup and background monitoring rendering block requests to open extra windows or tabs. Links that navigate the current browser still work.
+- Collections prefer a verified larger image for the same page when available, retain page identity/order and fall back to the earlier URL when needed. Tailspace duplicate-preview handling was improved.
+- Comic monitoring keeps routine no-new-page checks quiet. New-page/download activity still alerts, and check results and errors remain in history/logs.
+- **Add images to existing PDF** lets you choose a PDF, select and reorder additional image pages, and save an updated copy.
+- AstalaVR has a verified MP4 range-download fallback for eligible 403 failures and additional mobile request diagnostics. **Stop & save** has shutdown-race, finalization and export-stability improvements.
+
+Install a published APK over the existing app using the same signing identity. Developers should merge the applicable source patches into the complete project. This documentation update contains four Markdown files.
+
 An Android app for downloading video and audio, recording live streams, saving image and comic collections, and turning ordered comic pages into PDFs. As well as monitoring for automated download / recording video, live stream, and comics.
 
 Media processing runs on the device. The app uses yt-dlp for regular downloads, an embedded browser for assisted capture, and FFmpeg for media processing.

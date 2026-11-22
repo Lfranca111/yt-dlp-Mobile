@@ -40,17 +40,17 @@ internal class CollectionWebExtractor(
                     "The server returned a verification or access page, not collection content."
                 }
                 val leaf = CollectionSiteProfile.isLeaf(route.site, uri)
-                var images = if (leaf) pageImages(route.site, doc) else emptyList()
-                if (route.site in setOf("HentaiFox", "ComicPorn") && leaf && images.isEmpty()) images = galleryRegistry(doc)
+                var images = if (leaf) pageImageChoices(route.site, doc) else emptyList()
+                if (route.site in setOf("HentaiFox", "ComicPorn") && leaf && images.isEmpty()) images = galleryRegistry(doc).map { CollectionImageQuality.Choice(it) }
                 if (route.site == "nHentai" && leaf && images.isEmpty() && uri.path.trim('/').split('/').size == 2) images = runCatching { nhentai(uri) }.onFailure {
                     log("nHentai gallery metadata unavailable; trying the exposed reader links.")
-                }.getOrDefault(emptyList())
+                }.getOrDefault(emptyList()).map { CollectionImageQuality.Choice(it) }
                 val eightData = if (route.site == "8Muses") eightData(doc) else null
                 if (eightData != null) {
                     val pictures = eightData.optJSONArray("pictures")
                     images = (0 until (pictures?.length() ?: 0)).mapNotNull { i ->
                         pictures?.optJSONObject(i)?.optString("publicUri")?.takeIf { it.matches(Regex("[A-Za-z0-9._/-]+")) }
-                            ?.let { "https://comics.8muses.com/image/fl/$it" }
+                            ?.let { CollectionImageQuality.Choice("https://comics.8muses.com/image/fl/$it") }
                     }
                 }
                 // Hentai2Read's legacy reader exposes a chapter-only ordered image array.
@@ -61,20 +61,20 @@ internal class CollectionWebExtractor(
                         (0 until a.length()).mapNotNull { i ->
                             a.optString(i).takeIf(String::isNotBlank)?.let { raw ->
                                 val absolute = if (raw.startsWith("http")) raw else "https://hentaicdn.com/hentai" + raw
-                                absolute.takeIf(::isImage)
+                                absolute.takeIf(::isImage)?.let { CollectionImageQuality.Choice(it) }
                             }
                         }
                     }.getOrDefault(emptyList())
                 }
                 if (images.isNotEmpty()) {
                     val offset = folderCounts[task.folder] ?: 0
-                    val items = images.distinct().filter { mediaSeen.add(task.folder + "|" + it) }.mapIndexed { i, url ->
-                        val id = URI(url).path.substringAfterLast('/').substringBeforeLast('.').take(80).ifBlank { "page-${i+1}" }
-                        CollectionItem(id, url, if (route.site == "8Muses") "jpg" else URI(url).path.substringAfterLast('.').lowercase(), offset + i + 1,
-                            task.folder, referer = task.url)
+                    val items = images.filter { mediaSeen.add(task.folder + "|" + it.identity) }.mapIndexed { i, image ->
+                        val id = URI(image.identity).path.substringAfterLast('/').substringBeforeLast('.').take(80).ifBlank { "page-${i+1}" }
+                        CollectionItem(id, image.url, if (route.site == "8Muses") "jpg" else URI(image.identity).path.substringAfterLast('.').lowercase(),
+                            offset + i + 1, task.folder, fallbackUrl = image.previous, referer = task.url)
                     }
                     if (items.isNotEmpty()) { count += items.size; folderCounts[task.folder] = offset + items.size; batch(pages, items) }
-                    log("${route.site}: $type page $pages, ${items.size} ordered original images.")
+                    log("${route.site}: $type page $pages, ${items.size} ordered images; ${items.count { it.fallbackUrl.isNotBlank() }} higher-resolution variants selected.")
                 }
                 if (route.site == "Honeytoon" && doc.select(".comic-list__item--lock").isNotEmpty())
                     log("Honeytoon: locked episodes excluded; only readable pages exposed to this session are collected.")
@@ -151,7 +151,9 @@ internal class CollectionWebExtractor(
             val u = URI(url)
             u.scheme == "https" && u.userInfo == null && Regex("(?i)\\.(?:jpe?g|png|webp|gif|avif)$").containsMatchIn(u.path.orEmpty())
         }.getOrDefault(false)
-        fun pageImages(site: String, doc: Document): List<String> {
+        fun pageImages(site: String, doc: Document): List<String> = pageImageChoices(site, doc).map { it.url }
+
+        internal fun pageImageChoices(site: String, doc: Document): List<CollectionImageQuality.Choice> {
             val selector = when (site) {
                 "nHentai" -> "#image-container img, .reader-container img"
                 "Doujins" -> ".doujin img[data-file], .doujin img[data-src], .doujin-image img, img.doujin, img.doujin-image, img[data-file]"
@@ -168,12 +170,16 @@ internal class CollectionWebExtractor(
             return doc.select(selector).filter { el ->
                 !el.parents().any { parent -> Regex("(?i)(related|recommend|advert|sidebar)").containsMatchIn(parent.className()+" "+parent.id()) }
             }.mapNotNull { el ->
-                val raw = sequenceOf("data-original", "data-file", "data-src", "data-lazy-src", "src")
-                    .map { el.attr(it).trim() }.firstOrNull { it.isNotBlank() && !it.startsWith("data:") } ?: return@mapNotNull null
-                runCatching { URI(doc.baseUri()).resolve(raw).toString() }.getOrNull()
-                    ?.let { if (site == "MyHentaiGallery" && el.parents().any { p -> p.hasClass("comic-thumb") }) it.replace("/thumbnail/", "/original/") else it }
-                    ?.takeIf { isImage(it) && !junk.containsMatchIn(URI(it).path) }
-            }.distinct()
+                fun usable(raw: String): String? {
+                    if (raw.isBlank() || raw.startsWith("data:")) return null
+                    return runCatching { URI(doc.baseUri()).resolve(raw.trim()).toString() }.getOrNull()
+                        ?.let { if (site == "MyHentaiGallery" && el.parents().any { p -> p.hasClass("comic-thumb") }) it.replace("/thumbnail/", "/original/") else it }
+                        ?.takeIf { isImage(it) && !junk.containsMatchIn(URI(it).path) }
+                }
+                val baseline = sequenceOf("data-original", "data-file", "data-src", "data-lazy-src", "src")
+                    .firstNotNullOfOrNull { usable(el.attr(it)) } ?: return@mapNotNull null
+                CollectionImageQuality.choose(el, baseline, ::usable)
+            }.distinctBy { it.identity }
         }
         internal fun galleryRegistry(doc: Document): List<String> {
             // These readers publish a gallery-scoped page/format table. Only use
